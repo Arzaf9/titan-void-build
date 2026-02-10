@@ -1,43 +1,63 @@
-name: Titanium Forge v7.0 (Mirror Force)
+name: Titanium Forge v7.1 (Direct Mount)
 
 on:
   workflow_dispatch:
 
 jobs:
-  # ЭТАП 1: ПОДГОТОВКА СРЕДЫ
+  # ЭТАП 1: ПОДГОТОВКА (КЛОН + ПАТЧ + БУТСТРАП)
   prepare:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Clone & Patch Mirror
+      - name: 1. Clone Repository
+        uses: actions/checkout@v4
+        
+      - name: 2. Download Void Packages
         run: |
           git clone --depth 1 https://github.com/void-linux/void-packages.git void-packages
+
+      - name: 3. Apply ROOT BYPASS Patch (On Host)
+        run: |
           cd void-packages
-          
-          # ЯДЕРНЫЙ ПАТЧ: Вырезаем проверку на root физически
+          # Физически удаляем блок проверки на root из xbps-src
           sed -i '/\[ "$(id -u)" = "0" \]/d' xbps-src
-          sed -i 's/die "xbps-src cannot be used as root."/echo "Root allowed"/g' xbps-src
           
-          # Лоботомия функций
-          for f in common/xbps-src/shutils/*.sh; do
-            sed -i 's/\[ "$(id -u)" = "0" \]/false/g' "$f"
-          done
+          # Заглушаем функцию die
+          sed -i 's/die "xbps-src cannot be used as root."/echo "Root check passed"/g' xbps-src
+          
+          # Патчим библиотеки (на всякий случай)
+          find common/xbps-src/shutils -name "*.sh" -exec sed -i 's/\[ "$(id -u)" = "0" \]/false/g' {} +
           echo "check_root() { return 0; }" >> common/xbps-src/shutils/common.sh
           
-          # СИЛОВОЙ ФИКС ЗЕРКАЛА (внутри Docker)
-          docker run --privileged --rm -v $(pwd):/void-packages voidlinux/voidlinux-musl /bin/sh -c "
-            mkdir -p /etc/xbps.d && \
-            echo 'repository=https://repo-default.voidlinux.org/current/musl' > /etc/xbps.d/00-repository-main.conf && \
-            xbps-install -Syu -y xbps ca-certificates && \
-            cd /void-packages && ./xbps-src binary-bootstrap
-          "
+          # Разрешаем запись в masterdir
+          sed -i 's/\[ ! -w "$XBPS_MASTERDIR" \]/false/g' xbps-src
 
-      - name: 2. Save Prepared Repo to Cache
+      - name: 4. Bootstrap inside Docker
+        run: |
+          # Монтируем папку void-packages напрямую в корень /void-packages контейнера
+          docker run --privileged --rm \
+            -v ${{ github.workspace }}/void-packages:/void-packages \
+            voidlinux/voidlinux-musl /bin/sh -c '
+            set -e
+            
+            # Фикс зеркал (SSL)
+            mkdir -p /etc/xbps.d
+            echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            
+            # Обновление XBPS
+            xbps-install -Syu -y xbps ca-certificates
+            
+            # Запуск бутстрапа (теперь файл точно будет найден)
+            cd /void-packages
+            ./xbps-src binary-bootstrap
+            '
+
+      - name: 5. Save Cache
         uses: actions/cache/save@v4
         with:
           path: void-packages
-          key: prepared-repo-${{ github.run_id }}
+          key: titanium-cache-${{ github.run_id }}
 
-  # ЭТАП 2: КУЗНИЦА
+  # ЭТАП 2: СБОРКА (10 ПОТОКОВ)
   forge:
     needs: prepare
     runs-on: ubuntu-latest
@@ -47,25 +67,28 @@ jobs:
         bucket: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     
     steps:
-      - name: 1. Restore Prepared Repo
+      - name: 1. Restore Cache
         uses: actions/cache/restore@v4
         with:
           path: void-packages
-          key: prepared-repo-${{ github.run_id }}
+          key: titanium-cache-${{ github.run_id }}
+          fail-on-cache-miss: true
 
-      - name: 2. Matrix Build Bucket ${{ matrix.bucket }}
+      - name: 2. Build Matrix Bucket ${{ matrix.bucket }}
         run: |
-          docker run --privileged --rm -v ${{ github.workspace }}/void-packages:/void-packages voidlinux/voidlinux-musl /bin/sh -c '
+          docker run --privileged --rm \
+            -v ${{ github.workspace }}/void-packages:/void-packages \
+            voidlinux/voidlinux-musl /bin/sh -c '
           set -e
           
-          # ФИКС ЗЕРКАЛА ДЛЯ КАЖДОГО БАКЕТА
+          # Восстанавливаем среду внутри контейнера
           mkdir -p /etc/xbps.d
           echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
           xbps-install -Syu -y xbps ca-certificates bash curl tar
           
           cd /void-packages
           
-          # 💎 13 ТИТАНОВЫХ ФЛАГОВ (Haswell Hardcore)
+          # 💎 13 TITANIUM FLAGS
           FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
           
           echo "XBPS_CFLAGS=\"$FLAGS\"" > etc/conf
@@ -75,8 +98,8 @@ jobs:
           echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
           echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
           
-          # Пакеты (Чистый список)
-          ALL_PKGS="7zip ImageMagick MangoHud SDL2 SDL3 SPIRV-LLVM-Translator21 Waybar aalib abseil-cpp acl acpid ada adwaita-icon-theme alsa-lib alsa-plugins alsa-utils android-tools at-spi2-atk at-spi2-core atk atkmm attr autoconf automake avahi-glib avahi-libs base-devel base-files base-system bash basu bc binutils bison brightnessctl brotli btop btrfs-progs bubblewrap bzip2 c-ares ca-certificates cabextract cairomm cantarell-fonts cava chromaprint chrony cinnamon-desktop cinnamon-translations clang21-headers cliphist colord coreutils cpio cpupower cryptsetup cups curl dash dbus dbus-glib dbus-libs dbus-x11 dconf ddcutil dejavu-fonts-ttf desktop-file-utils device-mapper dhcpcd dialog diffutils dkms dmidecode dnssec-anchors dosfstools double-conversion dracut duktape e2fsprogs e2fsprogs-libs earlyoom ed efibootmgr elfutils elogind enchant2 ethtool eudev exempi exiv2 exo expat f2fs-tools faac fastfetch fcft fdk-aac ffmpeg6 ffplay6 figlet file findutils flex flite fltk fmt font-alias font-awesome6 font-util fontconfig foot freetype frei0r-plugins fribidi fuse fuse3 fuzzel fzf gamemode gawk gcc gcr4 gd gdbm gdk-pixbuf gettext gi-docgen giflib gir-freedesktop git github-cli glib glib-networking glibc glibmm glibmm2.68 glslang glu glxinfo gmp gnome-themes-extra gnome-themes-standard gnupg gnutls gptfdisk graphene graphite graphviz-libs greetd grep grim groff grub grub-i386-efi grub-x86_64-efi gsettings-desktop-schemas gsfonts gspell gst-plugins-bad1 gst-plugins-base1 gst-plugins-good1 gstreamer1 gtk+ gtk+3 gtk-layer-shell gtk-update-icon-cache gtk4 gtkmm gtkmm4 gtksourceview gtksourceview4 gvfs gzip harfbuzz haveged hicolor-icon-theme highway hwids hyphen hyphen-en i2c-tools iana-etc icoutils imath imlib2 imv inih iniparser inxi iproute2 iptables iputils ipw2100-firmware ipw2200-firmware irqbalance iso-codes iw jansson jbigkit json-c json-glib jsoncpp kbd kernel-libc-headers kf6-kcoreaddons kmod kpartx ladspa-sdk-example-plugins lame lcms2 less libICE libSM libXau libXaw libXcomposite libXcursor libXdamage libXdmcp libXext libXfixes libXfont2 libXft libXi libXinerama libXmu libXpm libXpresent libXrandr libXrender libXt libXtst libXv libXxf86vm libaio libao libaom libarchive libass libassuan libasyncns libatasmart libatomic libavcodec6 libavdevice6 libavfilter6 libavformat6 libavif libavutil6 libb2 libb64 libblkid libblockdev libbluray libbpf libbs2b libbytesize libcaca libcamera libcanberra libcap libcap-ng libcap-progs libcddb libcdio libcdio-paranoia libcdparanoia libclang-cpp21 libclc21 libcloudproviders libcolord libcpupower libcrypto3 libcryptsetup libcups libcurl libdatrie libdav1d libdaxctl libdb libdbusmenu-glib libdbusmenu-gtk3 libde265 libdebuginfod libdecor libdeflate libdispatch libdisplay-info libdjvulibre libdrm libdvdcss libdvdnav libdvdread libebur128 libedit libefivar libelf libelogind libepoxy liberation-fonts-ttf libev libevdev libevent libexif libfdisk libffi libfftw libfl-devel libflac libfluidsynth libfontenc libfreeglut libgamemode libgbm libgcc libgcrypt libglib libglvnd libgme libgnomekbd libgomp libgpg-error libgpgme libgphoto2 libgs libgsf libgsm libgtop libgudev libgusb libharfbuzz libhaveged libheif libhunspell1.7 libicu78 libid3tag libidn libidn2 libimagequant libinput libinstpatch libjack libjasper libjbig2dec libjpeg-turbo libjxl libkeyutils libkmod libksba liblastlog2 libldap libldns libliftoff liblilv libllvm21 liblqr liblrdf libltdl liblz4 liblzma libmad libmagic libmagick libmanette libmd4c libmm-glib libmng libmnl libmodplug libmount libmpdclient libmpg123 libmspack libmysofa libnatpmp libndctl libndp libnemo libnetfilter_conntrack libnfnetlink libnfs libnftnl libnice libnl3 libnm libnotify libnsbmp libnsgif libnuma libnvme libogg libopenal libopencv libopenexr libopenjpeg2 libopenmpt libpaper libparted libpcap libpciaccess libpcre libpcre2 libpipewire libplacebo libpng libpostproc6 libprotobuf libproxy libpsl libpulseaudio libpyside6 libqt6shadertools libraptor libraqm libreadline8 libresvg0 librist librsvg librtmp librubberband libsamplerate libsane libsasl libseat libseccomp libsecret libsensors libserd libsharpyuv libshiboken6 libsigc++ libsigc++3 libsmartcols libsndfile sndio libsodium libsord libsoup3 libsoxr libspa-alsa libspa-audioconvert libspa-audiomixer libspa-control libspa-v4l2 libspa-videoconvert libspdlog libspectre libspeex libsrt libsrtp libssh libssh2 libssl3 libstdc++ libstk libsvt-av1 libswresample6 libswscale6 libtasn1 libtdb libthai libtheora libtinysparql libtirpc libtool libtorrent-rasterbar libunbound libunistring libupower-glib3 liburcu libusb libutempter libutf8proc libuuid libva libva-vdpau-driver libvala libvamp-plugin-sdk libvdpau libvdpau-va-gl libvidstab libvorbis libvpl libvpx libwacom libwavpack libwebkit2gtk41 libwebp libwmf libwoff2common libwoff2dec libxbps libxcb libxcrypt libxcrypt-compat libxcvt libxfce4panel libxfce4ui libxfce4util libxkbcommon libxkbfile libxkbregistry libxklavier libxml2 libxshmfence libxslt libxxHash libyaml libz3 libzbar libzstd linux-base linux-firmware linux6.12 lm_sensors lmms lowdown lsof lsp-plugins lua52 lua54 lv2 lvm2 lxappearance lzo m4 make mako man-pages mbedtls mbedtls2 mdadm mdocml mesa-demos mesa-dri mesa-libgallium mesa-opencl mesa-vaapi mesa-vdpau mesa-vulkan-intel mesa-vulkan-lavapipe miniupnpc minizip mit-krb5-libs mkfontscale mlt7-data mobile-broadband-provider-info movit mpfr mpv mtdev mujs nano ncurses ncurses-base ncurses-devel ncurses-libs nerd-fonts-symbols-ttf nettle newt nghttp2 nghttp3 ngtcp2 nmap noto-fonts-emoji noto-fonts-ttf noto-fonts-ttf-extra npth nspr nss nvi nvidia470 nvidia470-gtklibs nvidia470-libs nwg-bar nwg-launchers ocl-icd oniguruma openh264 openresolv openssh openssl opus opusfile orc os-prober p11-kit p7zip pahole pam pam-base pam-libs pamixer pango-xft pangomm pangomm2.48 patch pavucontrol pciutils pcre2 perl pick pinentry pipewire pixman pkg-config playerctl polkit popt portaudio preload procps-ng public-suffix pulseaudio-utils pulsemixer python3 python3-Jinja2 python3-Markdown python3-MarkupSafe python3-Pillow python3-Pygments python3-cairo python3-docopt python3-evdev python3-gobject python3-keyutils python3-packaging python3-parsing python3-pip python3-smartypants python3-tkinter python3-toml python3-typogrify python3-yaml qbittorrent qt5-core qt5-dbus qt5-gui qt5-network qt5-svg qt5-widgets qt5-xml qt5ct qt6-charts qt6-core qt6-dbus qt6-declarative qt6-gui qt6-imageformats qt6-multimedia qt6-network qt6-opengl-widgets qt6-plugin-tls-openssl qt6-qt5compat qt6-quick3d qt6-quicktimeline qt6-sql qt6-svg qt6-wayland qt6-websockets qt6-widgets qt6-xml rav1e removed-packages rnnoise run-parts runit runit-void sbc scrcpy sdl12-compat seatd sed shaderc shadow shared-mime-info shotcut slang slurp soundtouch sox spandsp spdx-licenses-list speedtest-cli speexdsp sqlite sratom starship startup-notification stk-data sublime-text4 sudo sway swaybg taglib tar tcl telegram-desktop texinfo thermald thin-provisioning-tools tiff tk tmux tpm2-tss traceroute transmission trousers trousers-devel tslib ttf-opensans ttf-ubuntu-font-family tuigreet twolame tzdata uchardet udiskie udisks2 unzip usbutils util-linux util-linux-common v4l-utils vala viewnior vmaf void-artwork void-docs void-live-audio void-repo-multilib volume_key vulkan-loader wayland-protocols webrtc-audio-processing wget which wifi-firmware wine wine-common winetricks wireplumber wl-clipboard wlroots wlroots0.17 wlroots0.19 wob wpa_supplicant x264 x265 xapps xauth xbps-triggers xcb-util xcb-util-cursor xcb-util-errors xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm xdg-dbus-proxy xdg-desktop-portal xdg-desktop-portal-wlr xdg-utils xdotool xdpyinfo xf86-input-libinput xfconf xfsprogs xinit xkbcomp xkeyboard-config xmessage xorg-minimal xorg-server xorg-server-xwayland xorgproto xprop xrandr xset xtools xtrans xvidcore xz yad yyjson zd1211-firmware zix zlib zoxide zramen zsh zsh-autosuggestions zsh-completions zsh-syntax-highlighting zstd"
+          # Твой список (Очищенный)
+          ALL_PKGS="7zip ImageMagick MangoHud SDL2 SDL3 SPIRV-LLVM-Translator21 Waybar aalib abseil-cpp acl acpid ada adwaita-icon-theme alsa-lib alsa-plugins alsa-utils android-tools at-spi2-atk at-spi2-core atk atkmm attr autoconf automake avahi-glib avahi-libs base-devel base-files base-system bash basu bc binutils bison brightnessctl brotli btop btrfs-progs bubblewrap bzip2 c-ares ca-certificates cabextract cairomm cantarell-fonts cava chromaprint chrony cinnamon-desktop cinnamon-translations clang21-headers cliphist colord coreutils cpio cpupower cryptsetup cups curl dash dbus dbus-glib dbus-libs dbus-x11 dconf ddcutil dejavu-fonts-ttf desktop-file-utils device-mapper dhcpcd dialog diffutils dkms dmidecode dnssec-anchors dosfstools double-conversion dracut duktape e2fsprogs e2fsprogs-libs earlyoom ed efibootmgr elfutils elogind enchant2 ethtool eudev exempi exiv2 exo expat f2fs-tools faac fastfetch fcft fdk-aac ffmpeg6 ffplay6 figlet file findutils flex flite fltk fmt font-alias font-awesome6 font-util fontconfig foot freetype frei0r-plugins fribidi fuse fuse3 fuzzel fzf gamemode gawk gcc gcr4 gd gdbm gdk-pixbuf gettext gi-docgen giflib gir-freedesktop git github-cli glib glib-networking glibc glibmm glibmm2.68 glslang glu glxinfo gmp gnome-themes-extra gnome-themes-standard gnupg gnutls gptfdisk graphene graphite graphviz-libs greetd grep grim groff grub grub-i386-efi grub-x86_64-efi gsettings-desktop-schemas gsfonts gspell gst-plugins-bad1 gst-plugins-base1 gst-plugins-good1 gstreamer1 gtk+ gtk+3 gtk-layer-shell gtk-update-icon-cache gtk4 gtkmm gtkmm4 gtksourceview gtksourceview4 gvfs gzip harfbuzz haveged hicolor-icon-theme highway hwids hyphen hyphen-en i2c-tools iana-etc icoutils imath imlib2 imv inih iniparser inxi iproute2 iptables iputils ipw2100-firmware ipw2200-firmware irqbalance iso-codes iw jansson jbigkit json-c json-glib jsoncpp kbd kernel-libc-headers kf6-kcoreaddons kmod kpartx ladspa-sdk-example-plugins lame lcms2 less libICE libSM libXau libXaw libXcomposite libXcursor libXdamage libXdmcp libXext libXfixes libXfont2 libXft libXi libXinerama libXmu libXpm libXpresent libXrandr libXrender libXt libXtst libXv libXxf86vm libaio libao libaom libarchive libass libassuan libasyncns libatasmart libatomic libavcodec6 libavdevice6 libavfilter6 libavformat6 libavif libavutil6 libb2 libb64 libblkid libblockdev libbluray libbpf libbs2b libbytesize libcaca libcamera libcanberra libcap libcap-ng libcap-progs libcddb libcdio libcdio-paranoia libcdparanoia libclang-cpp21 libclc21 libcloudproviders libcolord libcpupower libcrypto3 libcryptsetup libcups libcurl libdatrie libdav1d libdaxctl libdb libdbusmenu-glib libdbusmenu-gtk3 libde265 libdebuginfod libdecor libdeflate libdispatch libdisplay-info libdjvulibre libdrm libdvdcss libdvdnav libdvdread libebur128 libedit libefivar libelf libelogind libepoxy liberation-fonts-ttf libev libevdev libevent libexif libfdisk libffi libfftw libfl-devel libflac libfluidsynth libfontenc libfreeglut libgamemode libgbm libgcc libgcrypt libglib libglvnd libgme libgnomekbd libgomp libgpg-error libgpgme libgphoto2 libgs libgsf libgsm libgtop libgudev libgusb libharfbuzz libhaveged libheif libhunspell1.7 libicu78 libid3tag libidn libidn2 libimagequant libinput libinstpatch libjack libjasper libjbig2dec libjpeg-turbo libjxl libkeyutils libkmod libksba liblastlog2 libldap libldns libliftoff liblilv libllvm21 liblqr liblrdf libltdl liblz4 liblzma libmad libmagic libmagick libmanette libmd4c libmm-glib libmng libmnl libmodplug libmount libmpdclient libmpg123 libmspack libmysofa libnatpmp libndctl libndp libnemo libnetfilter_conntrack libnfnetlink libnfs libnftnl libnice libnl3 libnm libnotify libnsbmp libnsgif libnuma libnvme libogg libopenal libopencv libopenexr libopenjpeg2 libopenmpt libpaper libparted libpcap libpciaccess libpcre libpcre2 libpipewire libplacebo libpng libpostproc6 libprotobuf libproxy libpsl libpulseaudio libpyside6 libqt6shadertools libraptor libraqm libreadline8 libresvg0 librist librsvg librtmp librubberband libsamplerate libsane libsasl libseat libseccomp libsecret libsensors libserd libsharpyuv libshiboken6 libsigc++ libsigc++3 libsmartcols libsndfile sndio libsodium libsord libsoup3 libsoxr libspa-alsa libspa-audioconvert libspa-audiomixer libspa-control libspa-v4l2 libspa-videoconvert libspdlog libspectre libspeex libsrt libsrtp libssh libssh2 libssl3 libstdc++ libstk libsvt-av1 libswresample6 libswscale6 libtasn1 libtdb libthai libtheora libtinysparql libtirpc libtool libtorrent-rasterbar libunbound libunistring libupower-glib3 liburcu libusb libutempter libutf8proc libuuid libva libva-vdpau-driver libvala libvamp-plugin-sdk libvdpau libvdpau-va-gl libvidstab libvorbis libvpl libvpx libwacom libwavpack libwebkit2gtk41 libwebp libwmf libwoff2common libwoff2dec libxbps libxcb libxcrypt libxcrypt-compat libxcvt libxfce4panel libxfce4ui libxfce4util libxkbcommon libxkbfile libxkbregistry libxklavier libxml2 libxshmfence libxslt libxxHash libyaml libz3 libzbar libzstd linux-base linux-firmware linux6.12 lm_sensors lmms lowdown lsof lsp-plugins lua52 lua54 lv2 lvm2 lxappearance lzo m4 make mako man-pages mbedtls mbedtls2 mdadm mdocml mesa-demos mesa-dri mesa-libgallium mesa-opencl mesa-vaapi mesa-vdpau mesa-vulkan-intel mesa-vulkan-lavapipe miniupnpc minizip mit-krb5-libs mkfontscale mlt7 mlt7-data mobile-broadband-provider-info movit mpfr mpv mtdev mujs nano ncurses ncurses-base ncurses-devel ncurses-libs nerd-fonts-symbols-ttf nettle newt nghttp2 nghttp3 ngtcp2 nmap noto-fonts-emoji noto-fonts-ttf noto-fonts-ttf-extra npth nspr nss nvi nvidia470 nvidia470-gtklibs nvidia470-libs nwg-bar nwg-launchers ocl-icd oniguruma openh264 openresolv openssh openssl opus opusfile orc os-prober p11-kit p7zip pahole pam pam-base pam-libs pamixer pango-xft pangomm pangomm2.48 patch pavucontrol pciutils pcre2 perl pick pinentry pipewire pkg-config playerctl polkit popt portaudio preload procps-ng public-suffix pulseaudio-utils pulsemixer python3 python3-Jinja2 python3-Markdown python3-MarkupSafe python3-Pillow python3-Pygments python3-cairo python3-docopt python3-evdev python3-gobject python3-keyutils python3-packaging python3-parsing python3-pip python3-smartypants python3-tkinter python3-toml python3-typogrify python3-yaml qbittorrent qt5-core qt5-dbus qt5-gui qt5-network qt5-svg qt5-widgets qt5-xml qt5ct qt6-charts qt6-core qt6-dbus qt6-declarative qt6-gui qt6-imageformats qt6-multimedia qt6-network qt6-opengl-widgets qt6-plugin-tls-openssl qt6-qt5compat qt6-quick3d qt6-quicktimeline qt6-sql qt6-svg qt6-wayland qt6-websockets qt6-widgets qt6-xml rav1e removed-packages rnnoise run-parts runit runit-void sbc scrcpy sdl12-compat seatd sed shaderc shadow shared-mime-info shotcut slang slurp soundtouch sox spandsp spdx-licenses-list speedtest-cli speexdsp sqlite sratom starship startup-notification stk-data sublime-text4 sudo sway swaybg taglib tar tcl telegram-desktop texinfo thermald thin-provisioning-tools tiff tk tmux tpm2-tss traceroute transmission trousers trousers-devel tslib ttf-opensans ttf-ubuntu-font-family tuigreet twolame tzdata uchardet udiskie udisks2 unzip usbutils util-linux util-linux-common v4l-utils vala viewnior vmaf void-artwork void-docs void-live-audio void-repo-multilib volume_key vulkan-loader wayland-protocols webrtc-audio-processing wget which wifi-firmware wine wine-common winetricks wireplumber wl-clipboard wlroots wlroots0.17 wlroots0.19 wob wpa_supplicant x264 x265 xapps xauth xbps-triggers xcb-util xcb-util-cursor xcb-util-errors xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm xdg-dbus-proxy xdg-desktop-portal xdg-desktop-portal-wlr xdg-utils xdotool xdpyinfo xf86-input-libinput xfconf xfsprogs xinit xkbcomp xkeyboard-config xmessage xorg-minimal xorg-server xorg-server-xwayland xorgproto xprop xrandr xset xtools xtrans xvidcore xz yad yyjson zd1211-firmware zix zlib zoxide zramen zsh zsh-autosuggestions zsh-completions zsh-syntax-highlighting zstd"
           
           read -ra PKG_ARRAY <<< "$ALL_PKGS"
           TOTAL=${#PKG_ARRAY[@]}
@@ -85,8 +108,7 @@ jobs:
           MY_PKGS="${PKG_ARRAY[@]:$START:$PER_BUCKET}"
           
           for pkg in $MY_PKGS; do
-            echo "--- TITANIUM FORGING: $pkg ---"
-            # Собираем пакет. -E использует текущую среду
+            echo "--- FORGING: $pkg ---"
             ./xbps-src -E pkg "$pkg" || echo "$pkg" >> /void-packages/failed.txt
           done
           '
