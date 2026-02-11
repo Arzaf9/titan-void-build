@@ -1,4 +1,4 @@
-name: Titanium Forge v14.0 (External Script)
+name: Titanium Forge v15.0 (Bootstrap Loader)
 
 on:
   workflow_dispatch:
@@ -7,31 +7,27 @@ jobs:
   forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Create Build Script (On Host)
+      - name: 1. Create Build Script (Host Side)
         run: |
-          # Создаем чистый скрипт без экранирования ада
+          # Этот скрипт будет запущен УЖЕ внутри Bash, когда мы его установим
           cat << 'EOF' > run_build.sh
           #!/bin/bash
           set -e
           
-          echo ">>> [1/5] SYSTEM SETUP (ROOT)"
-          mkdir -p /etc/xbps.d
-          echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-          xbps-install -S -y || true
-          xbps-install -y xbps ca-certificates
-          xbps-install -Syu -y bash sudo git curl tar base-devel
+          echo ">>> [STEP 2] INSTALLING BUILD TOOLS..."
+          # Bash уже есть, ставим остальное
+          xbps-install -Syu -y base-devel sudo git curl tar
           
-          echo ">>> [2/5] USER SETUP"
+          echo ">>> [STEP 3] SETUP USER 'BUILDER'"
           useradd -m -s /bin/bash builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           
-          # Готовим папку
           mkdir -p /home/builder/void-packages
           chown builder:builder /home/builder/void-packages
           
-          echo ">>> [3/5] SWITCHING TO BUILDER"
-          # Передаем управление юзеру
-          sudo -u builder -i bash << 'USER_SCRIPT'
+          echo ">>> [STEP 4] SWITCHING TO USER MODE"
+          # Передаем управление юзеру builder
+          sudo -u builder -i bash << 'USER_EOF'
           set -e
           cd /home/builder/void-packages
           
@@ -41,7 +37,7 @@ jobs:
           echo "   -> Bootstrap..."
           ./xbps-src binary-bootstrap
           
-          echo "   -> Configuring Titanium Flags..."
+          echo "   -> Configuring Haswell Flags..."
           FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
           
           echo "XBPS_CFLAGS=\"$FLAGS\"" > etc/conf
@@ -52,26 +48,44 @@ jobs:
           echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
           
           echo "   -> COMPILING PIXMAN..."
+          # -E (ethereal) обязательно для Docker
           ./xbps-src -E pkg pixman
           
-          echo ">>> BUILD FINISHED SUCCESSFULLY"
-          USER_SCRIPT
+          echo ">>> BUILD COMPLETE"
+          USER_EOF
           
-          echo ">>> [4/5] EXPORTING ARTIFACTS"
-          cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "No artifacts found"
+          echo ">>> [STEP 5] EXPORTING ARTIFACTS"
+          cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "Artifact copy failed/empty"
           EOF
           
-          # Делаем скрипт исполняемым
           chmod +x run_build.sh
           mkdir -p artifacts
 
-      - name: 2. Execute in Docker
+      - name: 2. Execute in Docker (Via SH -> BASH)
         run: |
-          # Монтируем скрипт и запускаем его
+          # ЗАПУСК ЧЕРЕЗ /bin/sh (так как bash еще нет)
           docker run --privileged --rm \
             -v ${{ github.workspace }}/run_build.sh:/run_build.sh \
             -v ${{ github.workspace }}/artifacts:/artifacts \
-            voidlinux/voidlinux-musl /bin/bash /run_build.sh
+            voidlinux/voidlinux-musl /bin/sh -c '
+            
+            set -e
+            echo ">>> [STEP 1] BOOTSTRAPPING CONTAINER..."
+            
+            # 1. Лечим зеркала
+            mkdir -p /etc/xbps.d
+            echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            
+            # 2. Обновляем xbps и ставим Bash
+            # Игнорируем ошибки первой синхронизации (SSL)
+            xbps-install -S -y || true
+            # Ставим ключи и bash
+            xbps-install -y xbps ca-certificates bash
+            
+            # 3. Передаем управление в Bash-скрипт
+            echo ">>> EXEC BASH SCRIPT"
+            /bin/bash /run_build.sh
+            '
 
       - name: 3. Upload Result
         if: always()
