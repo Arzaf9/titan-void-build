@@ -1,4 +1,4 @@
-name: Titanium Forge v13.1 (Script File)
+name: Titanium Forge v14.0 (External Script)
 
 on:
   workflow_dispatch:
@@ -7,71 +7,71 @@ jobs:
   forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Setup Artifacts
-        run: mkdir -p artifacts
-
-      - name: 2. Docker Execution
+      - name: 1. Create Build Script (On Host)
         run: |
+          # Создаем чистый скрипт без экранирования ада
+          cat << 'EOF' > run_build.sh
+          #!/bin/bash
+          set -e
+          
+          echo ">>> [1/5] SYSTEM SETUP (ROOT)"
+          mkdir -p /etc/xbps.d
+          echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+          xbps-install -S -y || true
+          xbps-install -y xbps ca-certificates
+          xbps-install -Syu -y bash sudo git curl tar base-devel
+          
+          echo ">>> [2/5] USER SETUP"
+          useradd -m -s /bin/bash builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          
+          # Готовим папку
+          mkdir -p /home/builder/void-packages
+          chown builder:builder /home/builder/void-packages
+          
+          echo ">>> [3/5] SWITCHING TO BUILDER"
+          # Передаем управление юзеру
+          sudo -u builder -i bash << 'USER_SCRIPT'
+          set -e
+          cd /home/builder/void-packages
+          
+          echo "   -> Cloning..."
+          git clone --depth 1 https://github.com/void-linux/void-packages.git .
+          
+          echo "   -> Bootstrap..."
+          ./xbps-src binary-bootstrap
+          
+          echo "   -> Configuring Titanium Flags..."
+          FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
+          
+          echo "XBPS_CFLAGS=\"$FLAGS\"" > etc/conf
+          echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
+          echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
+          echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
+          echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
+          echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
+          
+          echo "   -> COMPILING PIXMAN..."
+          ./xbps-src -E pkg pixman
+          
+          echo ">>> BUILD FINISHED SUCCESSFULLY"
+          USER_SCRIPT
+          
+          echo ">>> [4/5] EXPORTING ARTIFACTS"
+          cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "No artifacts found"
+          EOF
+          
+          # Делаем скрипт исполняемым
+          chmod +x run_build.sh
+          mkdir -p artifacts
+
+      - name: 2. Execute in Docker
+        run: |
+          # Монтируем скрипт и запускаем его
           docker run --privileged --rm \
+            -v ${{ github.workspace }}/run_build.sh:/run_build.sh \
             -v ${{ github.workspace }}/artifacts:/artifacts \
-            voidlinux/voidlinux-musl /bin/sh -c '
-            set -e
-            
-            # --- [ROOT] SETUP ---
-            echo "--> [ROOT] Installing deps..."
-            mkdir -p /etc/xbps.d
-            echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            xbps-install -S -y || true
-            xbps-install -y xbps ca-certificates
-            xbps-install -Syu -y bash sudo git curl tar base-devel
-            
-            echo "--> [ROOT] Creating User..."
-            useradd -m -s /bin/bash builder
-            echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-            
-            # --- [ROOT] WRITING THE SCRIPT ---
-            # Мы пишем действия юзера в отдельный файл, чтобы избежать ошибок синтаксиса
-            cat << "EOF_SCRIPT" > /home/builder/forge.sh
-            #!/bin/bash
-            set -e
-            cd /home/builder
-            
-            echo "--> [USER] Cloning..."
-            git clone --depth 1 https://github.com/void-linux/void-packages.git
-            cd void-packages
-            
-            echo "--> [USER] Bootstrap..."
-            ./xbps-src binary-bootstrap
-            
-            echo "--> [USER] Configuring..."
-            # Твои флаги теперь в безопасности внутри файла
-            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
-            
-            echo "XBPS_CFLAGS=\"\$FLAGS\"" > etc/conf
-            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
-            echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
-            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-            echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
-            echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
-            
-            echo "--> [USER] Building PIXMAN..."
-            ./xbps-src -E pkg pixman
-            
-            echo "--> [USER] Done."
-            EOF_SCRIPT
-            
-            # Делаем скрипт исполняемым и отдаем юзеру
-            chmod +x /home/builder/forge.sh
-            chown builder:builder /home/builder/forge.sh
-            
-            # --- [EXECUTION] ---
-            # Запускаем файл от имени builder
-            su builder -c /home/builder/forge.sh
-            
-            # --- [EXPORT] ---
-            echo "--> [ROOT] Exporting..."
-            cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "No binaries found"
-            '
+            voidlinux/voidlinux-musl /bin/bash /run_build.sh
 
       - name: 3. Upload Result
         if: always()
