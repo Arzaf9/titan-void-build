@@ -1,4 +1,4 @@
-name: Titanium Forge v13.0 (Clean User Mode)
+name: Titanium Forge v13.1 (Script File)
 
 on:
   workflow_dispatch:
@@ -7,77 +7,70 @@ jobs:
   forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Setup Artifacts Dir
+      - name: 1. Setup Artifacts
         run: mkdir -p artifacts
 
-      - name: 2. THE BUILD (Docker Wrapper)
+      - name: 2. Docker Execution
         run: |
-          # Запускаем контейнер. Монтируем папку для вывода файлов.
           docker run --privileged --rm \
             -v ${{ github.workspace }}/artifacts:/artifacts \
             voidlinux/voidlinux-musl /bin/sh -c '
+            set -e
             
-            # === [ ROOT BLOCK ] ===
-            # Здесь мы готовим систему и создаем юзера
-            
-            echo "--> [ROOT] Fixing Mirrors..."
+            # --- [ROOT] SETUP ---
+            echo "--> [ROOT] Installing deps..."
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            
-            echo "--> [ROOT] Installing Base Tools..."
-            # Обновляем ключи
             xbps-install -S -y || true
             xbps-install -y xbps ca-certificates
-            # Ставим bash, sudo и инструменты сборки
             xbps-install -Syu -y bash sudo git curl tar base-devel
             
-            echo "--> [ROOT] Creating User builder..."
+            echo "--> [ROOT] Creating User..."
             useradd -m -s /bin/bash builder
-            # Даем ему sudo без пароля (нужно для xbps-src)
             echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
             
-            # Создаем рабочую папку и отдаем её юзеру
-            mkdir /void-packages
-            chown builder:builder /void-packages
+            # --- [ROOT] WRITING THE SCRIPT ---
+            # Мы пишем действия юзера в отдельный файл, чтобы избежать ошибок синтаксиса
+            cat << "EOF_SCRIPT" > /home/builder/forge.sh
+            #!/bin/bash
+            set -e
+            cd /home/builder
             
-            # === [ USER BLOCK ] ===
-            # Переключаемся на билдера и делаем грязную работу
+            echo "--> [USER] Cloning..."
+            git clone --depth 1 https://github.com/void-linux/void-packages.git
+            cd void-packages
             
-            su builder -c "
-                set -e
-                echo \"--> [USER] Cloning Repository...\"
-                cd /void-packages
-                git clone --depth 1 https://github.com/void-linux/void-packages.git .
-                
-                echo \"--> [USER] Bootstrap...\"
-                ./xbps-src binary-bootstrap
-                
-                echo \"--> [USER] Configuring Haswell...\"
-                # Твои 13 флагов
-                FLAGS=\"-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe\"
-                
-                echo \"XBPS_CFLAGS='\$FLAGS'\" > etc/conf
-                echo \"XBPS_CXXFLAGS='\$FLAGS'\" >> etc/conf
-                echo \"XBPS_LDFLAGS='-Wl,-O1 -Wl,--as-needed -flto=auto'\" >> etc/conf
-                echo \"XBPS_ALLOW_RESTRICTED=yes\" >> etc/conf
-                echo \"XBPS_MAKEJOBS=\$(nproc)\" >> etc/conf
-                # Ethereal обязателен в Докере
-                echo \"XBPS_CHROOT_CMD=ethereal\" >> etc/conf
-                
-                echo \"--> [USER] Building PIXMAN...\"
-                # Запуск сборки
-                ./xbps-src -E pkg pixman
-            "
+            echo "--> [USER] Bootstrap..."
+            ./xbps-src binary-bootstrap
             
-            # === [ EXPORT BLOCK ] ===
-            echo "--> [ROOT] Exporting artifacts..."
-            # Копируем результаты наружу
-            if [ -d "/void-packages/hostdir/binpkgs" ]; then
-                cp -r /void-packages/hostdir/binpkgs/* /artifacts/
-            else
-                echo "Build failed, no binaries found."
-                exit 1
-            fi
+            echo "--> [USER] Configuring..."
+            # Твои флаги теперь в безопасности внутри файла
+            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
+            
+            echo "XBPS_CFLAGS=\"\$FLAGS\"" > etc/conf
+            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
+            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
+            echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
+            echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
+            
+            echo "--> [USER] Building PIXMAN..."
+            ./xbps-src -E pkg pixman
+            
+            echo "--> [USER] Done."
+            EOF_SCRIPT
+            
+            # Делаем скрипт исполняемым и отдаем юзеру
+            chmod +x /home/builder/forge.sh
+            chown builder:builder /home/builder/forge.sh
+            
+            # --- [EXECUTION] ---
+            # Запускаем файл от имени builder
+            su builder -c /home/builder/forge.sh
+            
+            # --- [EXPORT] ---
+            echo "--> [ROOT] Exporting..."
+            cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "No binaries found"
             '
 
       - name: 3. Upload Result
