@@ -1,66 +1,88 @@
-name: Titanium Forge v12.0 (Single Thread Test)
+name: Titanium Forge v13.0 (Clean User Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
-  test_build:
+  forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Prepare & Build
+      - name: 1. Setup Artifacts Dir
+        run: mkdir -p artifacts
+
+      - name: 2. THE BUILD (Docker Wrapper)
         run: |
+          # Запускаем контейнер. Монтируем папку для вывода файлов.
           docker run --privileged --rm \
             -v ${{ github.workspace }}/artifacts:/artifacts \
             voidlinux/voidlinux-musl /bin/sh -c '
-            set -e
             
-            # --- 1. СИСТЕМА ---
+            # === [ ROOT BLOCK ] ===
+            # Здесь мы готовим систему и создаем юзера
+            
+            echo "--> [ROOT] Fixing Mirrors..."
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            # Обновляем SSL и пакеты (как настоящий Root)
-            xbps-install -Syu -y xbps ca-certificates git bash base-devel binutils curl tar
             
-            # --- 2. КЛОНИРОВАНИЕ ---
-            git clone --depth 1 https://github.com/void-linux/void-packages.git /void-packages
-            cd /void-packages
+            echo "--> [ROOT] Installing Base Tools..."
+            # Обновляем ключи
+            xbps-install -S -y || true
+            xbps-install -y xbps ca-certificates
+            # Ставим bash, sudo и инструменты сборки
+            xbps-install -Syu -y bash sudo git curl tar base-devel
             
-            # --- 3. ЛОБОТОМИЯ (ВЫРЕЗАЕМ ПРОВЕРКИ) ---
-            # Мы не обманываем id, мы меняем код скрипта.
-            # Ищем строку с ошибкой и заменяем её на безобидную команду
-            sed -i "s/msg_error \"xbps-src cannot be used as root.\"/echo \"Running as Root (Titanium Mode)\"/g" xbps-src
-            # На случай, если проверка написана иначе:
-            sed -i "s/\[ \"\$(id -u)\" = \"0\" \]/false/g" xbps-src
+            echo "--> [ROOT] Creating User builder..."
+            useradd -m -s /bin/bash builder
+            # Даем ему sudo без пароля (нужно для xbps-src)
+            echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
             
-            # Патчим библиотеки shutils (везде, где есть проверка на root)
-            find common/xbps-src/shutils -name "*.sh" -exec sed -i "s/\[ \"\$(id -u)\" = \"0\" \]/false/g" {} +
+            # Создаем рабочую папку и отдаем её юзеру
+            mkdir /void-packages
+            chown builder:builder /void-packages
             
-            # --- 4. БУТСТРАП ---
-            ./xbps-src binary-bootstrap
+            # === [ USER BLOCK ] ===
+            # Переключаемся на билдера и делаем грязную работу
             
-            # --- 5. КОНФИГ HASWELL ---
-            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
-            echo "XBPS_CFLAGS=\"$FLAGS\"" > etc/conf
-            echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
-            echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
-            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-            echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
-            echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
+            su builder -c "
+                set -e
+                echo \"--> [USER] Cloning Repository...\"
+                cd /void-packages
+                git clone --depth 1 https://github.com/void-linux/void-packages.git .
+                
+                echo \"--> [USER] Bootstrap...\"
+                ./xbps-src binary-bootstrap
+                
+                echo \"--> [USER] Configuring Haswell...\"
+                # Твои 13 флагов
+                FLAGS=\"-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe\"
+                
+                echo \"XBPS_CFLAGS='\$FLAGS'\" > etc/conf
+                echo \"XBPS_CXXFLAGS='\$FLAGS'\" >> etc/conf
+                echo \"XBPS_LDFLAGS='-Wl,-O1 -Wl,--as-needed -flto=auto'\" >> etc/conf
+                echo \"XBPS_ALLOW_RESTRICTED=yes\" >> etc/conf
+                echo \"XBPS_MAKEJOBS=\$(nproc)\" >> etc/conf
+                # Ethereal обязателен в Докере
+                echo \"XBPS_CHROOT_CMD=ethereal\" >> etc/conf
+                
+                echo \"--> [USER] Building PIXMAN...\"
+                # Запуск сборки
+                ./xbps-src -E pkg pixman
+            "
             
-            # --- 6. ТЕСТОВАЯ СБОРКА (ТОЛЬКО БАЗА) ---
-            # Если это соберется, значит всё работает
-            for pkg in pixman cairo libX11 mesa; do
-                echo "🔨 FORGING: $pkg"
-                ./xbps-src -E -f pkg $pkg
-            done
-            
-            # --- 7. КОПИРОВАНИЕ ---
-            # Копируем рекурсивно, чтобы захватить структуру
-            cp -r hostdir/binpkgs/* /artifacts/ || echo "No packages built"
+            # === [ EXPORT BLOCK ] ===
+            echo "--> [ROOT] Exporting artifacts..."
+            # Копируем результаты наружу
+            if [ -d "/void-packages/hostdir/binpkgs" ]; then
+                cp -r /void-packages/hostdir/binpkgs/* /artifacts/
+            else
+                echo "Build failed, no binaries found."
+                exit 1
+            fi
             '
 
-      - name: 2. Upload Result
+      - name: 3. Upload Result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-test-build
-          path: artifacts/
+          name: titanium-pixman
+          path: artifacts/*.xbps
