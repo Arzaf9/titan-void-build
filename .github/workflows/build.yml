@@ -1,4 +1,4 @@
-name: Titanium Forge v19.0 (Cache & Persistence)
+name: Titanium Forge v20.0 (Ultimate Fix)
 
 on:
   workflow_dispatch:
@@ -7,83 +7,92 @@ jobs:
   forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Workspace Cleanup
+      - name: 1. Init Workspace
         run: |
-          # Чистим место, если нужно
-          sudo rm -rf artifacts
-          mkdir -p artifacts void-packages
+          sudo mkdir -p artifacts void-packages
+          # Даем полные права, чтобы Docker не спотыкался в начале
+          sudo chmod -R 777 void-packages artifacts
 
-      - name: 2. Persistent Cache for Void-Packages
+      - name: 2. Restore Persistent Cache
         uses: actions/cache@v4
         with:
           path: void-packages
-          # Кэш привязан к хешу, но будет восстанавливаться всегда
-          key: titanium-void-cache-${{ runner.os }}-${{ github.run_id }}
+          key: titanium-v20-${{ github.run_id }}
           restore-keys: |
-            titanium-void-cache-${{ runner.os }}-
-            titanium-void-cache-
+            titanium-v20-
 
-      - name: 3. Create Build Script
+      - name: 3. THE MASTER SCRIPT
         run: |
           cat << 'EOF' > run_build.sh
           #!/bin/bash
           set -e
 
-          echo ">>> [1/5] REPO SETUP..."
+          echo ">>> [1/5] PREPARING SYSTEM (ROOT)..."
           mkdir -p /etc/xbps.d
           echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
           
-          # Быстрая установка базы
+          # Установка системного минимума
           xbps-install -Sy || true
           xbps-install -y xbps ca-certificates
           xbps-install -Syu -y bash sudo git curl tar base-devel shadow
 
-          # Создаем юзера если нет
+          # Создаем юзера builder
           if ! id -u builder >/dev/null 2>&1; then
             useradd -m -s /bin/bash builder
             echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           fi
 
-          # Клонируем только если папка пуста (работает кэш)
-          if [ ! -d "/home/builder/void-packages/.git" ]; then
-            echo "--> Cache empty, cloning..."
-            sudo -u builder git clone --depth 1 https://github.com/void-linux/void-packages.git /home/builder/void-packages
-          else
-            echo "--> Using cached void-packages"
-            cd /home/builder/void-packages && sudo -u builder git pull
-          fi
+          # ИСПРАВЛЕНИЕ ПРАВ МОНТИРОВАНИЯ (КРИТИЧНО)
+          chown -R builder:builder /home/builder/void-packages
+          chmod -R 755 /home/builder/void-packages
 
-          echo ">>> [2/5] FIXING ETHEREAL ENVIRONMENT..."
-          # Устанавливаем базу сборки прямо в Докер
+          # Клонирование или обновление
+          sudo -u builder -i bash << 'USER_EOF'
+          set -e
+          cd ~/void-packages
+          if [ ! -d ".git" ]; then
+            echo "--> Folder empty, cloning..."
+            git clone --depth 1 https://github.com/void-linux/void-packages.git .
+          else
+            echo "--> Existing repo found, cleaning..."
+            git reset --hard
+            git pull
+          fi
+          USER_EOF
+
+          echo ">>> [2/5] INITIALIZING ETHEREAL MASTERDIR..."
+          # Чтобы xbps-src не ругался в ethereal режиме
           xbps-install -y base-chroot
-          # Метка для xbps-src, что эта система и есть мастер-директория
           touch /.xbps_chroot_init
 
-          echo ">>> [3/5] STARTING COMPILATION AS BUILDER..."
+          echo ">>> [3/5] STARTING COMPILATION..."
           sudo -u builder -i bash << 'USER_EOF'
           set -e
           cd ~/void-packages
 
-          # Настройка конфига (Мастердир = Корень)
+          # Конфиг Haswell
           echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
           echo "XBPS_MASTERDIR=/" >> etc/conf
           echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
           echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
           echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
 
-          # 💎 13 TITANIUM FLAGS
+          # 💎 13 ТИТАНОВЫХ ФЛАГОВ
           FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
           echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
           echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
           echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
           echo "   -> FORGING PIXMAN..."
-          # -E (ethereal) + -f (force)
           ./xbps-src -E -f pkg pixman
           USER_EOF
 
-          echo ">>> [4/5] EXPORTING..."
-          cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "No packages found"
+          echo ">>> [4/5] EXPORTING BINARIES..."
+          mkdir -p /artifacts
+          cp -v /home/builder/void-packages/hostdir/binpkgs/*.xbps /artifacts/ || echo "No packages found."
+
+          # Возвращаем права владельцу хоста (UID 1001), чтобы Cache смог сохраниться
+          chown -R 1001:1001 /home/builder/void-packages
           EOF
           chmod +x run_build.sh
 
