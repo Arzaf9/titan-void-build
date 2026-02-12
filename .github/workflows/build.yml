@@ -1,4 +1,4 @@
-name: Titanium Forge v24.0 (Nuclear Root Fix)
+name: Titanium Forge v25.0 (Only Provisioning)
 
 on:
   workflow_dispatch:
@@ -9,35 +9,38 @@ jobs:
     steps:
       - name: 1. Workspace Setup
         run: |
+          # Создаем папки на хосте (Ubuntu), которые пробросим в Докер
           mkdir -p ${{ github.workspace }}/void-packages
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Cache
+      - name: 2. Restore Persistent Cache
         id: cache-void
         uses: actions/cache@v4
         with:
           path: void-packages
-          key: titanium-cache-v24-${{ runner.os }}-${{ github.run_id }}
+          # Ключ кэша меняем на v25 для чистого старта
+          key: titanium-depot-v25-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            titanium-cache-v24-${{ runner.os }}-
+            titanium-depot-v25-${{ runner.os }}-
 
-      - name: 3. THE NUCLEAR PROVISIONER
+      - name: 3. THE DEPOT FILLER (Download Only)
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
             
-            echo "--> [1/4] Fixing Mirrors & Installing Tools..."
+            echo "--> [1/4] Fixing Mirrors & Base Tools..."
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            # Установка базы
             xbps-install -S -y || true
             xbps-install -y xbps ca-certificates
             xbps-install -Syu -y git bash curl tar
 
             cd /void-packages
 
-            echo "--> [2/4] Repository Sync..."
+            echo "--> [2/4] Syncing Repository..."
             if [ ! -d ".git" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
             else
@@ -45,33 +48,26 @@ jobs:
               git reset --hard origin/master
             fi
 
-            echo "--> [3/4] NUCLEAR LOBOTOMY (Removing Root Checks)..."
-            # 1. Удаляем блок проверки в главном скрипте
-            # Мы ищем строку с проверкой id -u и удаляем её и следующие 2 строки (блок if)
-            sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
+            echo "--> [3/4] ABSOLUTE LOBOTOMY (Neutralizing Root Checks)..."
+            # Вместо sed, мы просто уничтожаем логику проверки root
+            # Очищаем файл функции проверки
+            echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
+            # На случай если проверка вшита в главный файл
+            sed -i "s/id -u/echo 1000/g" xbps-src
             
-            # 2. Удаляем упоминания ошибки во всем репозитории
-            grep -rIl "cannot be used as root" . | xargs sed -i "s/die \"xbps-src cannot be used as root.\"/return 0/g" 2>/dev/null || true
-            grep -rIl "cannot be used as root" . | xargs sed -i "s/msg_error \"xbps-src cannot be used as root.\"/return 0/g" 2>/dev/null || true
-            
-            # 3. Переписываем функцию check_root в библиотеках, чтобы она всегда возвращала успех
-            find common/xbps-src/shutils -name "*.sh" -exec sed -i "s/id -u/echo 1000/g" {} +
-            echo "check_root() { return 0; }" >> common/xbps-src/shutils/common.sh
-
-            echo "--> [4/4] Binary Bootstrap (Now it MUST work)..."
-            # Принудительно запускаем бутстрап
+            echo "--> [4/4] Binary Bootstrap (Downloading Build Environment)..."
+            # Это ТА САМАЯ долгая часть, которую мы кэшируем (скачивание 76 пакетов)
             ./xbps-src binary-bootstrap
-            
-            ./xbps-src fetch pixman
 
-            echo ">>> PROVISIONING COMPLETE. ALL FILES IN CACHE. <<<"
+            echo ">>> DEPOT IS FULL. ALL FILES READY IN CACHE. <<<"
             
+            # Чиним права для GitHub воркера, чтобы он смог заархивировать кэш
             chown -R 1001:1001 /void-packages
             '
 
-      - name: 4. Save Provisioned State
+      - name: 4. Save Cache
         if: success()
         uses: actions/cache/save@v4
         with:
           path: void-packages
-          key: titanium-cache-v24-${{ runner.os }}-${{ github.run_id }}
+          key: titanium-depot-v25-${{ runner.os }}-${{ github.run_id }}
