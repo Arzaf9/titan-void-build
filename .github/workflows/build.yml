@@ -1,4 +1,4 @@
-name: Titanium Forge v18.0 (Final Mirror Fix)
+name: Titanium Forge v19.0 (Cache & Persistence)
 
 on:
   workflow_dispatch:
@@ -7,77 +7,97 @@ jobs:
   forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Create Internal Script
+      - name: 1. Workspace Cleanup
         run: |
-          cat << 'EOF' > titanium_build.sh
-          #!/bin/sh
+          # Чистим место, если нужно
+          sudo rm -rf artifacts
+          mkdir -p artifacts void-packages
+
+      - name: 2. Persistent Cache for Void-Packages
+        uses: actions/cache@v4
+        with:
+          path: void-packages
+          # Кэш привязан к хешу, но будет восстанавливаться всегда
+          key: titanium-void-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            titanium-void-cache-${{ runner.os }}-
+            titanium-void-cache-
+
+      - name: 3. Create Build Script
+        run: |
+          cat << 'EOF' > run_build.sh
+          #!/bin/bash
           set -e
 
-          echo ">>> [1/6] FORCE MIRROR RESET..."
+          echo ">>> [1/5] REPO SETUP..."
           mkdir -p /etc/xbps.d
-          # Прописываем зеркало вручную, игнорируя всё остальное
           echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-
-          echo ">>> [2/6] BOOTSTRAPPING TOOLS..."
-          # Обновляем ключи и ставим базу (используем -S чтобы обновить индексы)
+          
+          # Быстрая установка базы
           xbps-install -Sy || true
           xbps-install -y xbps ca-certificates
           xbps-install -Syu -y bash sudo git curl tar base-devel shadow
 
-          echo ">>> [3/6] SETTING UP USER builder..."
+          # Создаем юзера если нет
           if ! id -u builder >/dev/null 2>&1; then
             useradd -m -s /bin/bash builder
+            echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           fi
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-          echo ">>> [4/6] CLONING VOID-PACKAGES..."
-          rm -rf /home/builder/void-packages
-          sudo -u builder git clone --depth 1 https://github.com/void-linux/void-packages.git /home/builder/void-packages
+          # Клонируем только если папка пуста (работает кэш)
+          if [ ! -d "/home/builder/void-packages/.git" ]; then
+            echo "--> Cache empty, cloning..."
+            sudo -u builder git clone --depth 1 https://github.com/void-linux/void-packages.git /home/builder/void-packages
+          else
+            echo "--> Using cached void-packages"
+            cd /home/builder/void-packages && sudo -u builder git pull
+          fi
 
-          echo ">>> [5/6] STARTING COMPILATION..."
-          # Запускаем от имени юзера через bash
+          echo ">>> [2/5] FIXING ETHEREAL ENVIRONMENT..."
+          # Устанавливаем базу сборки прямо в Докер
+          xbps-install -y base-chroot
+          # Метка для xbps-src, что эта система и есть мастер-директория
+          touch /.xbps_chroot_init
+
+          echo ">>> [3/5] STARTING COMPILATION AS BUILDER..."
           sudo -u builder -i bash << 'USER_EOF'
           set -e
           cd ~/void-packages
 
-          echo "   -> Setting Ethereal Mode..."
-          echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
+          # Настройка конфига (Мастердир = Корень)
+          echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
+          echo "XBPS_MASTERDIR=/" >> etc/conf
           echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
+          echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
+          echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
 
-          echo "   -> Binary Bootstrap..."
-          ./xbps-src binary-bootstrap
-
-          echo "   -> Injecting Haswell Hardcore Flags..."
+          # 💎 13 TITANIUM FLAGS
           FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
           echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
           echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
           echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
-          echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-          echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
 
-          echo "   -> COMPILING PIXMAN..."
-          ./xbps-src pkg pixman
+          echo "   -> FORGING PIXMAN..."
+          # -E (ethereal) + -f (force)
+          ./xbps-src -E -f pkg pixman
           USER_EOF
 
-          echo ">>> [6/6] EXPORTING ARTIFACTS..."
-          mkdir -p /artifacts
-          cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ || echo "No packages found"
+          echo ">>> [4/5] EXPORTING..."
+          cp -r /home/builder/void-packages/hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "No packages found"
           EOF
+          chmod +x run_build.sh
 
-          chmod +x titanium_build.sh
-          mkdir -p artifacts
-
-      - name: 2. Run Docker (Pure SH Entry)
+      - name: 4. Run Docker
         run: |
-          # Заходим через /bin/sh, монтируем скрипт и папку для вывода
           docker run --privileged --rm \
-            -v ${{ github.workspace }}/titanium_build.sh:/titanium_build.sh \
+            -v ${{ github.workspace }}/run_build.sh:/run_build.sh \
             -v ${{ github.workspace }}/artifacts:/artifacts \
-            voidlinux/voidlinux-musl /bin/sh /titanium_build.sh
+            -v ${{ github.workspace }}/void-packages:/home/builder/void-packages \
+            voidlinux/voidlinux-musl /bin/sh /run_build.sh
 
-      - name: 3. Upload Result
+      - name: 5. Upload Result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-pixman
+          name: titanium-haswell-packages
           path: artifacts/
