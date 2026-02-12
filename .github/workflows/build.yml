@@ -1,70 +1,77 @@
-name: Titanium Forge v27.0 (Cache & Ghost Bypass)
+name: Titanium Forge v28.0 (Single Session User Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
-  prepare_and_forge:
+  forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Init Workspace
+      - name: 1. Workspace Setup
         run: |
           mkdir -p ${{ github.workspace }}/void-packages
+          # Даем права всем, чтобы хост и контейнер не ругались
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Void-Packages Cache
-        id: cache-repo
+      - name: 2. Restore Cache
+        id: cache-void
         uses: actions/cache@v4
         with:
           path: void-packages
-          key: void-repo-v27-${{ runner.os }}
+          key: void-persistent-v28-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            void-persistent-v28-${{ runner.os }}-
 
-      - name: 3. FILL THE DEPOT (Tools & Repo)
-        # Этот шаг сработает только если кэш пуст
-        if: steps.cache-repo.outputs.cache-hit != 'true'
+      - name: 3. THE TITANIUM BUILDER (Root Setup -> User Build)
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
-            echo "--> Fixing Mirrors & Installing Tools..."
+
+            echo ">>> [1/4] ROOT: PREPARING ENVIRONMENT"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            xbps-install -Syu -y xbps ca-certificates git bash curl tar
-
-            echo "--> Cloning Void-Packages..."
-            cd /void-packages
-            git clone --depth 1 https://github.com/void-linux/void-packages.git .
             
-            # Чиним права для кэша хоста
+            # Ставим bash и инструменты управления юзерами
+            xbps-install -Syu -y xbps ca-certificates bash shadow git curl tar base-devel
+
+            # Создаем обычного пользователя titan (UID 1000)
+            if ! id -u titan >/dev/null 2>&1; then
+              useradd -m titan
+            fi
+
+            # Отдаем папку пользователю
+            chown -R titan:titan /void-packages
+
+            echo ">>> [2/4] SWITCHING TO USER: titan"
+            # Переходим в bash от имени юзера titan
+            su titan -c "bash << 'USER_EOF'
+              set -e
+              cd /void-packages
+
+              echo '>>> [3/4] SYNCING REPOSITORY'
+              if [ ! -d '.git' ]; then
+                git clone --depth 1 https://github.com/void-linux/void-packages.git .
+              else
+                git fetch origin
+                git reset --hard origin/master
+              fi
+
+              echo '>>> [4/4] STARTING BINARY BOOTSTRAP (THE DEPOT)'
+              # Теперь xbps-src работает от обычного юзера. Никаких проверок на root!
+              ./xbps-src binary-bootstrap
+              
+              echo '>>> SUCCESS! ENVIRONMENT IS READY. <<<'
+            USER_EOF"
+
+            # Возвращаем права хосту для сохранения кэша
             chown -R 1001:1001 /void-packages
             '
 
-      - name: 4. THE GHOST BYPASS (The Real Hack)
-        # Этот шаг выполняется ВСЕГДА, он мгновенный
-        run: |
-          docker run --privileged --rm \
-            -v ${{ github.workspace }}/void-packages:/void-packages \
-            voidlinux/voidlinux-musl /bin/sh -c '
-            set -e
-            
-            # 🎭 СОЗДАЕМ ПРИЗРАЧНОЕ УДОСТОВЕРЕНИЕ
-            # Мы подменяем системную команду id. 
-            # Теперь когда xbps-src спросит "id -u", он получит "1000" вместо "0".
-            echo "#!/bin/sh" > /usr/local/bin/id
-            echo "echo 1000" >> /usr/local/bin/id
-            chmod +x /usr/local/bin/id
-            
-            # Проверяем, сработал ли хак
-            export PATH="/usr/local/bin:$PATH"
-            echo "Current Identity: UID=$(id -u)"
-
-            echo "--> Starting Binary Bootstrap (Download Build Base)..."
-            cd /void-packages
-            
-            # Запускаем через bash и прокидываем наш PATH с фейковым id
-            /bin/bash -c "export PATH=/usr/local/bin:\$PATH; ./xbps-src binary-bootstrap"
-
-            echo ">>> SUCCESS! DEPOT IS READY. <<<"
-            chown -R 1001:1001 /void-packages
-            '
+      - name: 4. Save Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: void-packages
+          key: void-persistent-v28-${{ runner.os }}-${{ github.run_id }}
