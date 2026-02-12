@@ -1,4 +1,4 @@
-name: Titanium Forge v28.0 (Single Session User Mode)
+name: Titanium Forge v29.0 (Clean Script Method)
 
 on:
   workflow_dispatch:
@@ -10,62 +10,64 @@ jobs:
       - name: 1. Workspace Setup
         run: |
           mkdir -p ${{ github.workspace }}/void-packages
-          # Даем права всем, чтобы хост и контейнер не ругались
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Cache
+      - name: 2. Restore Persistent Cache
         id: cache-void
         uses: actions/cache@v4
         with:
           path: void-packages
-          key: void-persistent-v28-${{ runner.os }}-${{ github.run_id }}
+          # Используем тот же ключ, чтобы подхватить уже сохраненный тобой кэш!
+          key: void-persistent-v28-${{ runner.os }}-
           restore-keys: |
-            void-persistent-v28-${{ runner.os }}-
+            void-persistent-v28-Linux-
 
-      - name: 3. THE TITANIUM BUILDER (Root Setup -> User Build)
+      - name: 3. THE TITANIUM BUILDER
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/4] ROOT: PREPARING ENVIRONMENT"
+            echo ">>> [1/3] ROOT: SYSTEM SETUP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
             
-            # Ставим bash и инструменты управления юзерами
+            # Ставим базу (быстро, так как xbps уже в образе)
             xbps-install -Syu -y xbps ca-certificates bash shadow git curl tar base-devel
 
-            # Создаем обычного пользователя titan (UID 1000)
-            if ! id -u titan >/dev/null 2>&1; then
-              useradd -m titan
-            fi
-
-            # Отдаем папку пользователю
+            # Создаем юзера titan
+            id -u titan >/dev/null 2>&1 || useradd -m titan
             chown -R titan:titan /void-packages
 
-            echo ">>> [2/4] SWITCHING TO USER: titan"
-            # Переходим в bash от имени юзера titan
-            su titan -c "bash << 'USER_EOF'
-              set -e
-              cd /void-packages
+            # --- СОЗДАЕМ ЧИСТЫЙ СКРИПТ ДЛЯ ЮЗЕРА (БЕЗ КАВЫЧЕК) ---
+            cat << "EOF_FORGE" > /tmp/forge.sh
+            set -e
+            cd /void-packages
 
-              echo '>>> [3/4] SYNCING REPOSITORY'
-              if [ ! -d '.git' ]; then
-                git clone --depth 1 https://github.com/void-linux/void-packages.git .
-              else
-                git fetch origin
-                git reset --hard origin/master
-              fi
+            echo ">>> [2/3] SYNCING REPOSITORY"
+            if [ ! -d ".git" ]; then
+              git clone --depth 1 https://github.com/void-linux/void-packages.git .
+            else
+              echo "Using cached repository. Syncing..."
+              git fetch origin
+              git reset --hard origin/master
+            fi
 
-              echo '>>> [4/4] STARTING BINARY BOOTSTRAP (THE DEPOT)'
-              # Теперь xbps-src работает от обычного юзера. Никаких проверок на root!
-              ./xbps-src binary-bootstrap
-              
-              echo '>>> SUCCESS! ENVIRONMENT IS READY. <<<'
-            USER_EOF"
+            echo ">>> [3/3] STARTING BINARY BOOTSTRAP"
+            # Выполняем бутстрап от юзера
+            ./xbps-src binary-bootstrap
+            
+            echo ">>> SUCCESS! DEPOT IS READY. <<<"
+            EOF_FORGE
 
-            # Возвращаем права хосту для сохранения кэша
+            # Даем права на запуск
+            chmod +x /tmp/forge.sh
+            
+            # ЗАПУСКАЕМ ОТ ИМЕНИ ЮЗЕРА
+            su titan -s /bin/bash /tmp/forge.sh
+
+            # Фикс прав для кэша GitHub
             chown -R 1001:1001 /void-packages
             '
 
