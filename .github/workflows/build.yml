@@ -1,4 +1,4 @@
-name: Titanium Forge v29.0 (Clean Script Method)
+name: Titanium Forge v30.0 (Sudo User Mode)
 
 on:
   workflow_dispatch:
@@ -7,73 +7,92 @@ jobs:
   forge:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Workspace Setup
+      - name: 1. Workspace Cleanup
         run: |
           mkdir -p ${{ github.workspace }}/void-packages
+          mkdir -p ${{ github.workspace }}/artifacts
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Persistent Cache
-        id: cache-void
+      - name: 2. Restore Cache
         uses: actions/cache@v4
         with:
           path: void-packages
-          # Используем тот же ключ, чтобы подхватить уже сохраненный тобой кэш!
-          key: void-persistent-v28-${{ runner.os }}-
+          key: void-persistent-v30-${{ github.run_id }}
           restore-keys: |
-            void-persistent-v28-Linux-
+            void-persistent-v28-
+            void-persistent-
 
       - name: 3. THE TITANIUM BUILDER
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
+            -v ${{ github.workspace }}/artifacts:/artifacts \
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/3] ROOT: SYSTEM SETUP"
+            echo ">>> [1/3] ROOT: SYSTEM PREP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
             
-            # Ставим базу (быстро, так как xbps уже в образе)
-            xbps-install -Syu -y xbps ca-certificates bash shadow git curl tar base-devel
+            # Установка базы + sudo (он критичен!)
+            xbps-install -Syu -y xbps ca-certificates bash shadow git curl tar base-devel sudo
 
-            # Создаем юзера titan
+            # Создаем юзера titan и даем ему права бога (sudo)
             id -u titan >/dev/null 2>&1 || useradd -m titan
+            echo "titan ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+            
+            # Настройка прав на папку
             chown -R titan:titan /void-packages
 
-            # --- СОЗДАЕМ ЧИСТЫЙ СКРИПТ ДЛЯ ЮЗЕРА (БЕЗ КАВЫЧЕК) ---
-            cat << "EOF_FORGE" > /tmp/forge.sh
+            # --- ПИШЕМ СКРИПТ СБОРКИ ---
+            cat << "EOF_FORGE" > /home/titan/forge.sh
             set -e
             cd /void-packages
 
-            echo ">>> [2/3] SYNCING REPOSITORY"
+            echo ">>> [2/3] REPO SYNC"
             if [ ! -d ".git" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
             else
-              echo "Using cached repository. Syncing..."
+              echo "Using cache. Syncing..."
               git fetch origin
               git reset --hard origin/master
             fi
 
-            echo ">>> [3/3] STARTING BINARY BOOTSTRAP"
-            # Выполняем бутстрап от юзера
-            ./xbps-src binary-bootstrap
+            echo ">>> [3/3] CONFIGURING ETHEREAL & HASWELL"
+            # Сразу включаем ethereal, чтобы избежать ошибок uid_map
+            echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
+            echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
+            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
+            echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
             
-            echo ">>> SUCCESS! DEPOT IS READY. <<<"
+            # 💎 13 ТИТАНОВЫХ ФЛАГОВ
+            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
+            echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
+
+            echo ">>> STARTING BINARY BOOTSTRAP"
+            # Теперь бутстрап пройдет через sudo в систему Докера
+            ./xbps-src binary-bootstrap
+
+            echo ">>> FORGING PIXMAN"
+            ./xbps-src -f pkg pixman
+
+            echo ">>> EXPORTING..."
+            cp -r hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "No pkgs yet"
             EOF_FORGE
 
-            # Даем права на запуск
-            chmod +x /tmp/forge.sh
-            
-            # ЗАПУСКАЕМ ОТ ИМЕНИ ЮЗЕРА
-            su titan -s /bin/bash /tmp/forge.sh
+            # Запуск от юзера
+            chmod +x /home/titan/forge.sh
+            chown titan:titan /home/titan/forge.sh
+            su titan -c "/bin/bash /home/titan/forge.sh"
 
-            # Фикс прав для кэша GitHub
+            # Возврат прав для кэша
             chown -R 1001:1001 /void-packages
             '
 
-      - name: 4. Save Cache
+      - name: 4. Upload Result
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/upload-artifact@v4
         with:
-          path: void-packages
-          key: void-persistent-v28-${{ runner.os }}-${{ github.run_id }}
+          name: titanium-package
+          path: artifacts/
