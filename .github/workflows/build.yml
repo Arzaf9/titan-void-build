@@ -1,4 +1,4 @@
-name: Titanium Forge v31.0 (Nuclear Root Mode)
+name: Titanium Forge v32.0
 
 on:
   workflow_dispatch:
@@ -14,15 +14,14 @@ jobs:
           sudo chmod -R 777 ${{ github.workspace }}
 
       - name: 2. Restore Cache
-        uses: actions/cache@v4
+        id: cache-void
+        uses: actions/cache/restore@v4
         with:
           path: void-packages
-          key: void-persistent-v31-${{ github.run_id }}
-          restore-keys: |
-            void-persistent-v30-
-            void-persistent-
+          key: titanium-v32-${{ github.run_id }}
+          restore-keys: titanium-v32-
 
-      - name: 3. THE TITANIUM BUILDER (ROOT FORCE)
+      - name: 3. THE TITANIUM BUILDER
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
@@ -30,64 +29,66 @@ jobs:
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/4] SYSTEM SETUP"
+            echo ">>> [1/4] FIXING SYSTEM & MIRRORS"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            
-            # Установка инструментов
-            xbps-install -Syu -y xbps ca-certificates bash git curl tar base-devel
+            xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel
+
+            # ФИКС GIT (Dubious ownership)
+            git config --global --add safe.directory /void-packages
 
             cd /void-packages
 
-            echo ">>> [2/4] REPOSITORY SYNC"
+            echo ">>> [2/4] REPO SYNC"
             if [ ! -d ".git" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
             else
-              echo "Using cache. Updating..."
-              git fetch origin
-              git reset --hard origin/master
+              git fetch origin && git reset --hard origin/master
             fi
 
-            echo ">>> [3/4] NUCLEAR LOBOTOMY (BYPASS ROOT CHECK)"
-            # Мы физически удаляем проверку на Root из файла xbps-src
-            # Удаляем блок: if [ "$(id -u)" = "0" ]; ... fi
+            echo ">>> [3/4] NUCLEAR LOBOTOMY"
+            # Удаляем проверку на Root физически
             sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
-            
-            # Удаляем проверки в библиотеках
+            # Патчим библиотеки
             find common/xbps-src/shutils -name "*.sh" -exec sed -i "s/id -u/echo 1000/g" {} +
             echo "check_root() { return 0; }" >> common/xbps-src/shutils/common.sh
 
             echo ">>> [4/4] CONFIGURING & BUILDING"
-            # Метка готовности
+            # Метка, что бутстрап сделан
             touch /.xbps_chroot_init
-
+            
             # Конфиг Haswell
             echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
             echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
             echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
             echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
             
-            # 💎 13 ТИТАНОВЫХ ФЛАГОВ
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
             echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
             echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
-            echo "--> Starting Binary Bootstrap..."
+            # Бутстрап (скачивает базу в систему Докера)
             ./xbps-src binary-bootstrap
 
-            echo "--> BUILDING PIXMAN..."
-            # -E (ethereal) используем текущую среду
+            # Сборка
             ./xbps-src -E pkg pixman
 
-            echo ">>> EXPORTING..."
-            cp -r hostdir/binpkgs/* /artifacts/ 2>/dev/null || echo "Build still in progress or no pkgs."
+            # Копируем результат
+            cp -r hostdir/binpkgs/* /artifacts/ 2>/dev/null || true
             
-            # Чиним права для сохранения кэша GitHub
+            # ВАЖНО ДЛЯ КЭША: возвращаем права юзеру гитхаба (1001)
             chown -R 1001:1001 /void-packages
             '
 
-      - name: 4. Upload Result
+      - name: 4. Save Cache (Force Always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: void-packages
+          key: titanium-v32-${{ github.run_id }}
+
+      - name: 5. Upload Result
         if: always()
         uses: actions/upload-artifact@v4
         with:
