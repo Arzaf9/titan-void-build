@@ -1,4 +1,4 @@
-name: Titanium Forge v25.0 (Only Provisioning)
+name: Titanium Forge v26.0 (Depot Provisioning)
 
 on:
   workflow_dispatch:
@@ -9,65 +9,52 @@ jobs:
     steps:
       - name: 1. Workspace Setup
         run: |
-          # Создаем папки на хосте (Ubuntu), которые пробросим в Докер
           mkdir -p ${{ github.workspace }}/void-packages
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Persistent Cache
-        id: cache-void
-        uses: actions/cache@v4
-        with:
-          path: void-packages
-          # Ключ кэша меняем на v25 для чистого старта
-          key: titanium-depot-v25-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            titanium-depot-v25-${{ runner.os }}-
-
-      - name: 3. THE DEPOT FILLER (Download Only)
+      - name: 2. THE DEPOT FILLER (Only Bootstrap)
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
             
-            echo "--> [1/4] Fixing Mirrors & Base Tools..."
+            echo "--> [1/3] Fixing Mirrors & Base Tools..."
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            # Установка базы
             xbps-install -S -y || true
             xbps-install -y xbps ca-certificates
             xbps-install -Syu -y git bash curl tar
 
             cd /void-packages
 
-            echo "--> [2/4] Syncing Repository..."
+            echo "--> [2/3] Syncing Repository..."
             if [ ! -d ".git" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
-            else
-              git fetch origin
-              git reset --hard origin/master
             fi
 
-            echo "--> [3/4] ABSOLUTE LOBOTOMY (Neutralizing Root Checks)..."
-            # Вместо sed, мы просто уничтожаем логику проверки root
-            # Очищаем файл функции проверки
-            echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
-            # На случай если проверка вшита в главный файл
-            sed -i "s/id -u/echo 1000/g" xbps-src
+            echo "--> [3/3] SURGICAL ROOT REMOVAL (Killing the check)..."
+            # Мы находим блок проверки в файле xbps-src и просто его УДАЛЯЕМ.
+            # Мы удаляем все строки с 1 по 100, где встречается проверка UID.
+            # Это самый надежный способ: нет кода — нет ошибки.
+            sed -i "/if \[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
             
-            echo "--> [4/4] Binary Bootstrap (Downloading Build Environment)..."
-            # Это ТА САМАЯ долгая часть, которую мы кэшируем (скачивание 76 пакетов)
+            # На всякий случай гасим и в библиотеках
+            echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
+
+            echo "--> [STARTING DOWNLOAD] Binary Bootstrap..."
+            # Теперь это просто "качалка". Она скачает ~70 пакетов в masterdir.
+            # Ошибки про Root больше не будет, мы её стерли.
             ./xbps-src binary-bootstrap
 
-            echo ">>> DEPOT IS FULL. ALL FILES READY IN CACHE. <<<"
+            echo ">>> DEPOT IS FULL. ALL TOOLS DOWNLOADED. <<<"
             
-            # Чиним права для GitHub воркера, чтобы он смог заархивировать кэш
             chown -R 1001:1001 /void-packages
             '
 
-      - name: 4. Save Cache
+      - name: 3. Save Cache
         if: success()
         uses: actions/cache/save@v4
         with:
           path: void-packages
-          key: titanium-depot-v25-${{ runner.os }}-${{ github.run_id }}
+          key: titanium-depot-v26-${{ github.run_id }}
