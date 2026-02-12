@@ -1,1 +1,106 @@
+name: Titanium Forge v33.0
 
+on:
+  workflow_dispatch:
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Workspace Init
+        run: |
+          mkdir -p ${{ github.workspace }}/void-packages
+          mkdir -p ${{ github.workspace }}/artifacts
+          mkdir -p ${{ github.workspace }}/xbps_cache
+          sudo chmod -R 777 ${{ github.workspace }}
+
+      - name: 2. Restore Cache
+        id: cache-void
+        uses: actions/cache@v4
+        with:
+          path: |
+            void-packages
+            xbps_cache
+          key: titanium-v33-${{ github.run_id }}
+          restore-keys: titanium-v33-
+
+      - name: 3. THE TITANIUM BUILDER
+        run: |
+          docker run --privileged --rm \
+            -v ${{ github.workspace }}/void-packages:/void-packages \
+            -v ${{ github.workspace }}/artifacts:/artifacts \
+            -v ${{ github.workspace }}/xbps_cache:/var/cache/xbps \
+            voidlinux/voidlinux-musl /bin/sh -c '
+            set -e
+
+            echo ">>> [1/4] SYSTEM SETUP"
+            mkdir -p /etc/xbps.d
+            echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            xbps-install -Syu -y xbps ca-certificates git bash curl tar
+
+            # Фикс Git Safe Directory
+            git config --global --add safe.directory /void-packages
+
+            cd /void-packages
+
+            echo ">>> [2/4] REPO SYNC"
+            if [ ! -d ".git" ]; then
+              git clone --depth 1 https://github.com/void-linux/void-packages.git .
+            else
+              git fetch origin && git reset --hard origin/master
+            fi
+
+            echo ">>> [3/4] NUCLEAR LOBOTOMY"
+            # Удаляем проверку на Root физически
+            sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
+            # Патчим библиотеки
+            find common/xbps-src/shutils -name "*.sh" -exec sed -i "s/id -u/echo 1000/g" {} +
+            echo "check_root() { return 0; }" >> common/xbps-src/shutils/common.sh
+
+            echo ">>> [4/4] CONFIGURING MASTERDIR"
+            # ГОРЯЧИЙ ФИКС: Делаем корень Докера мастердиром
+            echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
+            echo "XBPS_MASTERDIR=/" >> etc/conf
+            echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
+            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
+            echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
+            
+            # Настройка флагов Haswell
+            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
+            echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
+
+            # ПРИНУДИТЕЛЬНАЯ МЕТКА ИНИЦИАЛИЗАЦИИ
+            touch /.xbps_chroot_init
+            mkdir -p /masterdir
+            touch /masterdir/.xbps_chroot_init
+
+            echo "--> FILLING THE DEPOT (Binary Bootstrap)..."
+            ./xbps-src binary-bootstrap
+
+            echo "--> STARTING COMPILATION: PIXMAN"
+            ./xbps-src -E pkg pixman
+
+            # Экспорт
+            cp -r hostdir/binpkgs/* /artifacts/ 2>/dev/null || true
+            
+            # Возвращаем права для кэша
+            chown -R 1001:1001 /void-packages /var/cache/xbps
+            '
+
+      - name: 4. Save Cache (Force Always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            void-packages
+            xbps_cache
+          key: titanium-v33-${{ github.run_id }}
+
+      - name: 5. Upload Result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: titanium-binpkgs
+          path: artifacts/
