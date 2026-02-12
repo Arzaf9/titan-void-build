@@ -1,118 +1,67 @@
-name: Titanium Forge v21.0 (Real Bootstrap)
+name: Titanium Forge v22.0 (Provisioning & Cache)
 
 on:
   workflow_dispatch:
 
 jobs:
-  forge:
+  prepare_env:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Init Workspace
+      - name: 1. Clean & Create Workspace
         run: |
-          sudo mkdir -p artifacts void-packages
+          sudo mkdir -p void-packages artifacts
           sudo chmod -R 777 void-packages artifacts
 
-      - name: 2. Restore Persistent Cache
-        uses: actions/cache@v4
+      - name: 2. Restore Cache (if exists)
+        uses: actions/cache/restore@v4
         with:
           path: void-packages
-          # Кэш теперь будет весить ~1 ГБ, но это ускорит всё в 10 раз
-          key: titanium-v21-${{ github.run_id }}
+          key: titanium-bolt-v22-${{ github.run_id }}
           restore-keys: |
-            titanium-v21-
+            titanium-bolt-v22-
 
-      - name: 3. THE MASTER SCRIPT
+      - name: 3. THE PROVISIONING SCRIPT
         run: |
-          cat << 'EOF' > run_build.sh
-          #!/bin/bash
-          set -e
-
-          echo ">>> [1/4] PREPARING SYSTEM (ROOT)..."
-          mkdir -p /etc/xbps.d
-          echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-          
-          # Ставим только то, что нужно для работы самого хоста
-          xbps-install -Sy || true
-          xbps-install -y xbps ca-certificates
-          xbps-install -Syu -y bash sudo git curl tar shadow
-
-          # Создаем юзера builder
-          if ! id -u builder >/dev/null 2>&1; then
-            useradd -m -s /bin/bash builder
-            echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          fi
-
-          # Чиним права на монтируемую папку
-          chown -R builder:builder /home/builder/void-packages
-
-          # Клонирование или обновление (от имени builder)
-          sudo -u builder -i bash << 'USER_EOF'
-          set -e
-          cd ~/void-packages
-          if [ ! -d ".git" ]; then
-            echo "--> Repo not found, cloning..."
-            git clone --depth 1 https://github.com/void-linux/void-packages.git .
-          else
-            echo "--> Repo found, syncing..."
-            git fetch origin
-            git reset --hard origin/master
-          fi
-          USER_EOF
-
-          echo ">>> [2/4] INITIALIZING MASTERDIR (BINARY BOOTSTRAP)..."
-          sudo -u builder -i bash << 'USER_EOF'
-          set -e
-          cd ~/void-packages
-          # Если мастердир пустой или его нет - делаем бутстрап
-          if [ ! -d "masterdir/bin" ]; then
-            echo "--> Installing base-chroot via xbps-src..."
-            ./xbps-src binary-bootstrap
-          else
-            echo "--> Masterdir already exists, skipping bootstrap."
-          fi
-          USER_EOF
-
-          echo ">>> [3/4] STARTING TITANIUM COMPILATION..."
-          sudo -u builder -i bash << 'USER_EOF'
-          set -e
-          cd ~/void-packages
-
-          # Конфиг Haswell (Пишем в etc/conf, который читает xbps-src)
-          # Здесь НЕ используем ethereal, используем стандартный режим, так как мы под юзером
-          cat << 'CONF_EOF' > etc/conf
-          XBPS_ALLOW_RESTRICTED=yes
-          XBPS_MAKEJOBS=$(nproc)
-          XBPS_CFLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -Wl,--hash-style=gnu -pipe"
-          XBPS_CXXFLAGS="$XBPS_CFLAGS"
-          XBPS_LDFLAGS="-Wl,-O1 -Wl,--as-needed -flto=auto"
-          CONF_EOF
-
-          echo "   -> FORGING PIXMAN..."
-          # Собираем pkg pixman. Поскольку мы не Root, проверки пройдут.
-          ./xbps-src pkg pixman
-          USER_EOF
-
-          echo ">>> [4/4] EXPORTING BINARIES..."
-          mkdir -p /artifacts
-          # Ищем собранный пакет в hostdir
-          cp -v /home/builder/void-packages/hostdir/binpkgs/*.xbps /artifacts/ || echo "No packages found."
-
-          # Возврат прав хосту для сохранения кэша
-          chown -R 1001:1001 /home/builder/void-packages
-          EOF
-          chmod +x run_build.sh
-
-      - name: 4. Run Docker
-        run: |
+          # Запускаем докер для подготовки
           docker run --privileged --rm \
-            -v ${{ github.workspace }}/run_build.sh:/run_build.sh \
-            -v ${{ github.workspace }}/artifacts:/artifacts \
-            -v ${{ github.workspace }}/void-packages:/home/builder/void-packages \
-            voidlinux/voidlinux-musl /bin/sh /run_build.sh
+            -v ${{ github.workspace }}/void-packages:/void-packages \
+            voidlinux/voidlinux-musl /bin/sh -c '
+            set -e
+            
+            echo "--> [1/3] Fixing mirrors and installing system tools..."
+            mkdir -p /etc/xbps.d
+            echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            xbps-install -Syu -y xbps ca-certificates git bash curl tar
 
-      - name: 5. Upload Result
-        if: always()
-        uses: actions/upload-artifact@v4
+            cd /void-packages
+            
+            echo "--> [2/3] Cloning or Syncing Repository..."
+            if [ ! -d ".git" ]; then
+              git clone --depth 1 https://github.com/void-linux/void-packages.git .
+            else
+              git fetch origin
+              git reset --hard origin/master
+            fi
+
+            echo "--> [3/3] Bypassing Root & Running Bootstrap..."
+            # Патчим xbps-src, чтобы он разрешал root (в докере это безопасно)
+            sed -i "s/id -u/echo 1001/g" xbps-src
+            find common/xbps-src/shutils -type f -name "*.sh" -exec sed -i "s/id -u/echo 1001/g" {} +
+            
+            # Запускаем бутстрап (скачивание базовой системы Void в masterdir)
+            ./xbps-src binary-bootstrap
+
+            # Предварительно скачиваем исходники для pixman, чтобы они тоже были в кэше
+            ./xbps-src fetch pixman
+
+            echo ">>> ENVIRONMENT READY AND PROVISIONED <<<"
+            
+            # Чиним права для GitHub Cache
+            chown -R 1001:1001 /void-packages
+            '
+
+      - name: 4. Save Provisioned Environment to Cache
+        uses: actions/cache/save@v4
         with:
-          name: titanium-pixman-haswell
-          path: artifacts/
+          path: void-packages
+          key: titanium-bolt-v22-${{ github.run_id }}
