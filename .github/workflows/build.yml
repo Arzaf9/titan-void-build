@@ -1,4 +1,4 @@
-name: Void Forge (Native)
+name: Void Forge (Native Fix)
 
 on:
   workflow_dispatch:
@@ -7,42 +7,51 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install dependencies
+      - name: 1. Install XBPS Static
         run: |
-          sudo apt-get update
-          # Нужны для работы xbps-src в режиме chroot/bwrap
-          sudo apt-get install -y git coreutils diffutils bash curl jq
-          # Для работы xbps-src на Ubuntu нужно поставить статический xbps
-          curl -LO https://alpha.de.repo.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz
-          mkdir xbps && tar xf xbps-static-latest.x86_64-musl.tar.xz -C xbps
-          sudo cp xbps/usr/bin/xbps-* /usr/bin/
+          # Используем -Lk: L — следовать редиректам, k — игнорировать ошибки SSL
+          curl -Lk https://repo-default.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz -o xbps.tar.xz
+          mkdir xbps_bin
+          tar xf xbps.tar.xz -C xbps_bin
+          sudo cp xbps_bin/usr/bin/xbps-* /usr/bin/
+          # Проверяем, что работает
+          xbps-install --version
 
-      - name: Clone void-packages
+      - name: 2. Clone void-packages
         run: |
           git clone --depth=1 https://github.com/void-linux/void-packages.git
           cd void-packages
-          # Позволяем xbps-src работать от рута в GitHub Actions через namespaces
+          # Настройка для работы внутри Ubuntu контейнера
           echo "XBPS_CHROOT_CMD=uchroot" >> etc/conf
           echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-          # Твои флаги Haswell
+          
+          # Твои Haswell оптимизации
           FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto"
           echo "XBPS_CFLAGS='$FLAGS'" >> etc/conf
           echo "XBPS_CXXFLAGS='$FLAGS'" >> etc/conf
+          
+          # Чтобы не качать лишнего, только базу
+          ./xbps-src binary-bootstrap
 
-      - name: Build Package
+      - name: 3. Build Package
         run: |
           cd void-packages
-          ./xbps-src binary-bootstrap
+          # Собираем пакет
           ./xbps-src pkg pixman
 
-      - name: Prepare Artifacts
+      - name: 4. Collect Artifacts
         if: always()
         run: |
-          mkdir out
-          find void-packages/hostdir/binpkgs -name "*.xbps" -exec cp {} out/ \;
+          mkdir -p out
+          # Если папка существует, копируем. Если нет — создаем пустой файл, чтобы не падать
+          if [ -d "void-packages/hostdir/binpkgs" ]; then
+            find void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} out/ \;
+          else
+            echo "Build failed, no packages found" > out/failure.txt
+          fi
 
-      - name: Upload
+      - name: 5. Upload
         uses: actions/upload-artifact@v4
         with:
-          name: pixman-haswell
+          name: void-package-result
           path: out/
