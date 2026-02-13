@@ -1,43 +1,45 @@
-name: Void Forge (Ultra Mode)
+name: Void Forge (Final Boss Fix)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     container:
       image: voidlinux/voidlinux-musl:latest
       options: --privileged
 
     steps:
-      - name: 1. System Setup (Root)
+      - name: 1. Prepare Environment (Root)
         run: |
-          # 1. Исправляем репозитории (уходим с alpha.de)
+          # 1. Сносим старые конфиги репозиториев
           rm -rf /etc/xbps.d/*
-          echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
           
-          # 2. Обновляем xbps и ставим базу (игнорим SSL, пока не обновим ca-certificates)
-          xbps-install -Syu -y -o SSL_NO_VERIFY=true xbps
-          xbps-install -Syu -y -o SSL_NO_VERIFY=true ca-certificates git bash curl tar base-devel sudo
+          # 2. Используем HTTP (без S), чтобы гарантированно обойти проблемы с сертификатами на старте
+          echo "repository=http://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+          
+          # 3. Обновляемся и ставим всё необходимое
+          xbps-install -Syu -y xbps
+          xbps-install -Syu -y ca-certificates git bash sudo base-devel tar curl
 
-          # 3. Создаем пользователя builder (xbps-src не работает от root)
-          useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          # 4. Создаем пользователя, так как xbps-src запрещено запускать от root
+          if ! id -u builder >/dev/null 2>&1; then
+            useradd -m builder
+            echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          fi
 
-      - name: 2. Clone & Permissions
+      - name: 2. Setup and Build (Builder)
         run: |
+          # Клонируем репо и меняем владельца
           git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
-          # Даем пользователю builder полные права на папку
           chown -R builder:builder /void-packages
-
-      - name: 3. Forge Package (as Builder)
-        run: |
-          # Запускаем всё от имени пользователя builder
+          
+          # Запускаем сборку от имени юзера
           su builder -c '
             cd /void-packages
             
-            # Настройка конфига
+            # Настройка: режим ethereal (сборка прямо в системе без контейнеров в контейнере)
             echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
             echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
             
@@ -45,25 +47,21 @@ jobs:
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto"
             echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
-            
-            # Сборка пакета
-            # SSL_NO_VERIFY=true на случай, если внутри сборки опять упадет SSL
-            export SSL_NO_VERIFY=true
+
+            # Собираем пакет
             ./xbps-src pkg pixman
           '
 
-      - name: 4. Export Result
+      - name: 3. Collect Artifacts
         if: always()
         run: |
           mkdir -p /artifacts
           if [ -d "/void-packages/hostdir/binpkgs" ]; then
             find /void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
-          else
-            echo "Пакет не найден. Что-то пошло не так." > /artifacts/error.log
           fi
 
-      - name: 5. Upload
+      - name: 4. Upload
         uses: actions/upload-artifact@v4
         with:
-          name: pixman-optimized-xbps
+          name: void-pixman-haswell
           path: /artifacts/
