@@ -1,121 +1,48 @@
-name: Titanium Forge v45.0 (Legit User Mode)
+name: Void Forge (Native)
 
 on:
   workflow_dispatch:
 
 jobs:
-  forge:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Workspace Init
+      - name: Install dependencies
         run: |
-          mkdir -p ${{ github.workspace }}/void-packages
-          mkdir -p ${{ github.workspace }}/artifacts
-          mkdir -p ${{ github.workspace }}/xbps_pkg_cache
-          sudo chmod -R 777 ${{ github.workspace }}
+          sudo apt-get update
+          # Нужны для работы xbps-src в режиме chroot/bwrap
+          sudo apt-get install -y git coreutils diffutils bash curl jq
+          # Для работы xbps-src на Ubuntu нужно поставить статический xbps
+          curl -LO https://alpha.de.repo.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz
+          mkdir xbps && tar xf xbps-static-latest.x86_64-musl.tar.xz -C xbps
+          sudo cp xbps/usr/bin/xbps-* /usr/bin/
 
-      - name: 2. Restore Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            void-packages
-            xbps_pkg_cache
-          key: titanium-v43-${{ github.run_id }}
-          restore-keys: titanium-v43-
-
-      - name: 3. THE LEGIT BUILDER
+      - name: Clone void-packages
         run: |
-          docker run --privileged --rm \
-            -v ${{ github.workspace }}/void-packages:/void-packages \
-            -v ${{ github.workspace }}/artifacts:/artifacts \
-            -v ${{ github.workspace }}/xbps_pkg_cache:/var/cache/xbps \
-            voidlinux/voidlinux-musl /bin/sh -c '
-            set -e
+          git clone --depth=1 https://github.com/void-linux/void-packages.git
+          cd void-packages
+          # Позволяем xbps-src работать от рута в GitHub Actions через namespaces
+          echo "XBPS_CHROOT_CMD=uchroot" >> etc/conf
+          echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
+          # Твои флаги Haswell
+          FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto"
+          echo "XBPS_CFLAGS='$FLAGS'" >> etc/conf
+          echo "XBPS_CXXFLAGS='$FLAGS'" >> etc/conf
 
-            echo ">>> [1/4] ROOT: SYSTEM PREP"
-            mkdir -p /etc/xbps.d
-            echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            
-            # Ставим bash и sudo (ОБЯЗАТЕЛЬНО)
-            xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel sudo shadow
+      - name: Build Package
+        run: |
+          cd void-packages
+          ./xbps-src binary-bootstrap
+          ./xbps-src pkg pixman
 
-            # Создаем реального юзера builder
-            if ! id -u builder >/dev/null 2>&1; then
-              useradd -m -s /bin/bash builder
-              # Разрешаем sudo без пароля (критично для xbps-src)
-              echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-            fi
-
-            # Отдаем папку будущему владельцу
-            chown -R builder:builder /void-packages
-
-            # --- СКРИПТ ОТ ИМЕНИ ЮЗЕРА ---
-            cat << "EOF_USER" > /home/builder/build.sh
-            #!/bin/bash
-            set -e
-            cd /void-packages
-
-            echo ">>> [2/4] USER: REPO SYNC"
-            # Мы проверяем, владеем ли мы папкой
-            git config --global --add safe.directory /void-packages
-            
-            if [ ! -d ".git" ]; then
-              git clone --depth 1 https://github.com/void-linux/void-packages.git .
-            else
-              git fetch origin && git reset --hard origin/master
-            fi
-
-            echo ">>> [3/4] USER: CONFIGURATION"
-            # Чистим старый конфиг
-            rm -f etc/conf
-
-            # 1. Запрещаем качать бинарники (только сборка)
-            echo "XBPS_SKIP_REMOTEREPOS=yes" >> etc/conf
-            # 2. Разрешаем несвободные пакеты
-            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-            # 3. Количество ядер
-            echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
-            # 4. ВАЖНО: Отключаем unshare через режим ethereal, 
-            # но работаем в локальной папке (не в корне /)
-            echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
-            
-            # Флаги Haswell
-            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
-            echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
-            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
-            echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
-
-            echo ">>> [4/4] USER: EXECUTION"
-            # 1. Бутстрап (скачивает базу в ./masterdir)
-            # Ошибки root не будет, т.к. мы user builder
-            ./xbps-src binary-bootstrap
-
-            echo "--> FORGING PIXMAN..."
-            # -E заставляет использовать текущее окружение (но внутри masterdir)
-            ./xbps-src -E pkg pixman
-            
-            echo ">>> BUILD SUCCESS <<<"
-            EOF_USER
-
-            # Права на скрипт
-            chmod +x /home/builder/build.sh
-            chown builder:builder /home/builder/build.sh
-
-            # ЗАПУСК ОТ ИМЕНИ ЮЗЕРА
-            su builder -c "/bin/bash /home/builder/build.sh"
-
-            # ЭКСПОРТ (делает Root)
-            echo ">>> ROOT: EXPORTING ARTIFACTS"
-            find /void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
-            
-            # Возврат прав для кэша GitHub
-            chown -R 1001:1001 /void-packages /var/cache/xbps
-            chmod -R 777 /artifacts
-            '
-
-      - name: 4. Upload Result
+      - name: Prepare Artifacts
         if: always()
+        run: |
+          mkdir out
+          find void-packages/hostdir/binpkgs -name "*.xbps" -exec cp {} out/ \;
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-pixman-user
-          path: artifacts/
+          name: pixman-haswell
+          path: out/
