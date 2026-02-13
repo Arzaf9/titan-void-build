@@ -1,4 +1,4 @@
-name: Titanium Forge v33.0
+name: Titanium Forge v34.0
 
 on:
   workflow_dispatch:
@@ -9,18 +9,19 @@ jobs:
     steps:
       - name: 1. Workspace Init
         run: |
+          # Создаем структуру папок на хосте
           mkdir -p ${{ github.workspace }}/void-packages
           mkdir -p ${{ github.workspace }}/artifacts
           mkdir -p ${{ github.workspace }}/xbps_cache
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Cache
-        id: cache-void
+      - name: 2. Restore Persistent Cache
         uses: actions/cache@v4
         with:
           path: |
             void-packages
             xbps_cache
+          # Используем ключ от v33, чтобы подтянуть то, что уже скачали
           key: titanium-v33-${{ github.run_id }}
           restore-keys: titanium-v33-
 
@@ -33,74 +34,65 @@ jobs:
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/4] SYSTEM SETUP"
+            echo ">>> [1/4] SYSTEM RECOVERY"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            # Ставим только критику, остальное в кэше
             xbps-install -Syu -y xbps ca-certificates git bash curl tar
 
-            # Фикс Git Safe Directory
+            # Фикс Git (Dubious ownership)
             git config --global --add safe.directory /void-packages
 
             cd /void-packages
 
-            echo ">>> [2/4] REPO SYNC"
+            echo ">>> [2/4] REPO SYNC & ROOT LOBOTOMY"
             if [ ! -d ".git" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
             else
               git fetch origin && git reset --hard origin/master
             fi
 
-            echo ">>> [3/4] NUCLEAR LOBOTOMY"
-            # Удаляем проверку на Root физически
-            sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
-            # Патчим библиотеки
-            find common/xbps-src/shutils -name "*.sh" -exec sed -i "s/id -u/echo 1000/g" {} +
-            echo "check_root() { return 0; }" >> common/xbps-src/shutils/common.sh
+            # Ядерный патч Root-проверки (самый стабильный метод)
+            sed -i "s/\[ \"\$(id -u)\" = \"0\" \]/false/g" xbps-src
+            # Патчим библиотеку функций
+            echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
 
-            echo ">>> [4/4] CONFIGURING MASTERDIR"
-            # ГОРЯЧИЙ ФИКС: Делаем корень Докера мастердиром
+            echo ">>> [3/4] CONFIGURING HASWELL EXTREME"
+            # Принудительно задаем корень системы как мастердир
             echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
             echo "XBPS_MASTERDIR=/" >> etc/conf
             echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
             echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
             echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
             
-            # Настройка флагов Haswell
+            # 💎 ТВОИ 13 ТИТАНОВЫХ ФЛАГОВ
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
             echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
             echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
-            # ПРИНУДИТЕЛЬНАЯ МЕТКА ИНИЦИАЛИЗАЦИИ
+            # Создаем паспорт инициализации
             touch /.xbps_chroot_init
-            mkdir -p /masterdir
-            touch /masterdir/.xbps_chroot_init
 
-            echo "--> FILLING THE DEPOT (Binary Bootstrap)..."
+            echo "--> FILLING DEPOT (Binary Bootstrap)..."
             ./xbps-src binary-bootstrap
 
-            echo "--> STARTING COMPILATION: PIXMAN"
-            ./xbps-src -E pkg pixman
+            echo "--> FORGING PIXMAN (TEST BUILD)..."
+            # -f форсирует пересборку из исходников, -E использует текущую систему
+            ./xbps-src -E -f pkg pixman
 
-            # Экспорт
-            cp -r hostdir/binpkgs/* /artifacts/ 2>/dev/null || true
+            echo ">>> [4/4] EXPORTING BINARIES"
+            # Ищем собранный .xbps файл и кидаем в артефакты
+            find hostdir/binpkgs -name "pixman-*.xbps" -exec cp -v {} /artifacts/ \;
             
-            # Возвращаем права для кэша
+            # Фикс прав для сохранения кэша GitHub
+            chmod -R 777 /artifacts
             chown -R 1001:1001 /void-packages /var/cache/xbps
             '
 
-      - name: 4. Save Cache (Force Always)
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            void-packages
-            xbps_cache
-          key: titanium-v33-${{ github.run_id }}
-
-      - name: 5. Upload Result
+      - name: 4. Upload Result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-binpkgs
+          name: titanium-pixman-haswell
           path: artifacts/
