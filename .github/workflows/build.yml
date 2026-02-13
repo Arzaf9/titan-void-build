@@ -1,4 +1,4 @@
-name: Titanium Forge v43.0
+name: Titanium Forge v43.1 (Verbose Debug)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,6 @@ jobs:
           mkdir -p ${{ github.workspace }}/void-packages
           mkdir -p ${{ github.workspace }}/artifacts
           mkdir -p ${{ github.workspace }}/xbps_pkg_cache
-          # Даем полные права, чтобы Docker и GitHub Runner не дрались
           sudo chmod -R 777 ${{ github.workspace }}
 
       - name: 2. Restore Persistent Cache
@@ -22,11 +21,9 @@ jobs:
             void-packages
             xbps_pkg_cache
           key: titanium-v43-${{ github.run_id }}
-          restore-keys: |
-            titanium-v43-
-            titanium-v42-
+          restore-keys: titanium-v43-
 
-      - name: 3. THE TITANIUM BUILDER
+      - name: 3. THE TITANIUM BUILDER (VERBOSE)
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
@@ -34,38 +31,57 @@ jobs:
             -v ${{ github.workspace }}/xbps_pkg_cache:/var/cache/xbps \
             voidlinux/voidlinux-musl /bin/sh -c '
             
-            # Мы НЕ ставим set -e сразу, чтобы увидеть ошибки патчей
-            echo ">>> [1/5] SYSTEM REPAIR"
+            echo ">>> [1/5] REPAIRING SYSTEM"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
             
-            # Установка инструментов (из кэша, если есть)
-            xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel shadow
-            
-            set -e
-            git config --global --add safe.directory /void-packages
-            cd /void-packages
+            # Ставим базу
+            xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel shadow || echo "System update had warnings"
 
-            echo ">>> [2/5] REPO SYNC"
-            [ ! -d ".git" ] && git clone --depth 1 https://github.com/void-linux/void-packages.git .
+            # Переходим в репо
+            git config --global --add safe.directory /void-packages
+            cd /void-packages || exit 1
+
+            echo ">>> [2/5] REPO CHECK"
+            if [ ! -d ".git" ]; then
+              echo "Cloning repo..."
+              git clone --depth 1 https://github.com/void-linux/void-packages.git . || exit 1
+            fi
             git fetch origin && git reset --hard origin/master
 
-            echo ">>> [3/5] FUNCTION OVERRIDE (Lobotimizer)"
-            # Мы не патчим sed-ом, мы ПЕРЕОПРЕДЕЛЯЕМ функции
-            # Дописываем в конец common.sh заглушки, которые заменят оригиналы
-            cat << EOF_FUNC >> common/xbps-src/shutils/common.sh
-            check_root() { return 0; }
-            check_unshare() { return 0; }
-            EOF_FUNC
+            echo ">>> [3/5] LOBOTOMY & OVERRIDE"
+            
+            # Ищем, где реально лежат библиотеки
+            SHUTILS_DIR=$(find . -type d -name shutils | head -n 1)
+            echo "Shutils directory found at: $SHUTILS_DIR"
+            
+            if [ -z "$SHUTILS_DIR" ]; then
+                echo "CRITICAL ERROR: Shutils not found!"
+                ls -R
+                exit 1
+            fi
 
-            # Дописываем в chroot.sh, чтобы убить ошибки resolv.conf и symlink
-            cat << EOF_CHROOT >> common/xbps-src/shutils/chroot.sh
-            setup_chroot() { return 0; }
-            chroot_handler() { shift; eval "\$@"; }
-            EOF_CHROOT
+            # 🎭 ГЛАВНЫЙ ВЗЛОМ: Подменяем ID системы
+            # Это обманет проверку check_root без правки кода
+            mv /usr/bin/id /usr/bin/id_real
+            echo "#!/bin/sh" > /usr/bin/id
+            echo "if [ \"\$1\" = \"-u\" ]; then echo 1001; else /usr/bin/id_real \"\$@\"; fi" >> /usr/bin/id
+            chmod +x /usr/bin/id
+            echo "Identity check: UID is $(id -u) (Should be 1001)"
+
+            # Отключаем unshare (на всякий случай)
+            ln -sf /bin/true /usr/bin/unshare
+
+            # 💉 ПРЯМАЯ ИНЪЕКЦИЯ В БИБЛИОТЕКИ (с проверкой)
+            echo "Patching common.sh..."
+            [ -f "$SHUTILS_DIR/common.sh" ] && echo "check_root() { return 0; }" >> "$SHUTILS_DIR/common.sh"
+            
+            echo "Patching chroot.sh..."
+            if [ -f "$SHUTILS_DIR/chroot.sh" ]; then
+                echo "chroot_handler() { shift; eval \"\$@\"; }" >> "$SHUTILS_DIR/chroot.sh"
+            fi
 
             echo ">>> [4/5] CONFIGURING HASWELL"
-            # Чистый конфиг
             cat << CONF_EOF > etc/conf
             XBPS_CHROOT_CMD=ethereal
             XBPS_MASTERDIR=/
@@ -77,21 +93,28 @@ jobs:
             
             # 💎 13 ТИТАНОВЫХ ФЛАГОВ
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
-            echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
-            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
+            echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
             # Паспорт системы
             touch /.xbps_chroot_init
+            mkdir -p masterdir
+            touch masterdir/.xbps_chroot_init
 
-            echo ">>> [5/5] FORGING PIXMAN (GCC START)"
-            # Теперь запуск обязан пройти без ошибок прав и путей
-            ./xbps-src -E -f pkg pixman
+            echo ">>> [5/5] FORGING PIXMAN"
+            # Запускаем bash для сборки
+            /bin/bash ./xbps-src -E -f pkg pixman 2>&1 | tee /tmp/build_log.txt
 
             echo ">>> EXPORTING BINARIES"
             find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
-            # ВАЖНО: возвращаем права юзеру гитхаба (1001), чтобы кэш сохранился
+            # Если артефактов нет, покажем почему
+            if [ ! "$(ls -A /artifacts)" ]; then
+                echo "Build failed. Last 50 lines of log:"
+                tail -n 50 /tmp/build_log.txt
+            fi
+
             chmod -R 777 /artifacts
             chown -R 1001:1001 /void-packages /var/cache/xbps
             '
@@ -100,5 +123,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-pixman-haswell
+          name: titanium-debug-log
           path: artifacts/
