@@ -1,4 +1,4 @@
-name: Titanium Forge v35.0 (Force Compile)
+name: Titanium Forge v35.0 (Force Source Build)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,6 @@ jobs:
           path: |
             void-packages
             xbps_cache
-          # Используем тот же ключ, чтобы не качать заново
           key: titanium-v33-${{ github.run_id }}
           restore-keys: titanium-v33-
 
@@ -33,57 +32,60 @@ jobs:
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/5] SYSTEM RECOVERY"
+            echo ">>> [1/4] SYSTEM PREP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            # Быстрая доустановка мелочей (основное в кэше)
             xbps-install -Syu -y xbps ca-certificates git bash curl tar
 
-            # Фикс Git
+            # Git Fix
             git config --global --add safe.directory /void-packages
             cd /void-packages
 
-            echo ">>> [2/5] CLEANUP & PREP"
-            # Удаляем старые бинарники, чтобы не путаться
+            echo ">>> [2/4] REPO SYNC & CLEANUP"
+            # Удаляем старые бинарники, чтобы точно собрать новые
             rm -rf hostdir/binpkgs/*
             
-            # Синхронизация
-            [ ! -d ".git" ] && git clone --depth 1 https://github.com/void-linux/void-packages.git .
-            
+            if [ ! -d ".git" ]; then
+              git clone --depth 1 https://github.com/void-linux/void-packages.git .
+            else
+              git fetch origin && git reset --hard origin/master
+            fi
+
             # Root Patch
             sed -i "s/\[ \"\$(id -u)\" = \"0\" \]/false/g" xbps-src
             echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
 
-            echo ">>> [3/5] REVISION HACK (Tricking the Builder)"
-            # МЫ МЕНЯЕМ ВЕРСИЮ ПАКЕТА ЛОКАЛЬНО
-            # Это заставит xbps-src думать, что это новая версия, и он ОБЯЗАН её собрать.
-            sed -i "s/revision=.*/revision=99/" srcpkgs/pixman/template
-            echo "Pixman template revision bumped to 99!"
-
-            echo ">>> [4/5] CONFIGURING HASWELL"
+            echo ">>> [3/4] CONFIGURING HASWELL EXTREME"
             echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
             echo "XBPS_MASTERDIR=/" >> etc/conf
             echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
             echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-            echo "XBPS_MAKEJOBS=\$(nproc)" >> etc/conf
+            echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
             
-            # 💎 13 ФЛАГОВ
+            # !!! ГЛАВНОЕ ИЗМЕНЕНИЕ !!!
+            # Запрещаем скачивать готовые бинарники. Только хардкор, только компиляция.
+            echo "XBPS_SKIP_REMOTEREPOS=yes" >> etc/conf
+            
+            # Флаги
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
-            echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
-            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
+            echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
             touch /.xbps_chroot_init
 
-            echo "--> PRE-FLIGHT (Bootstrap)..."
+            echo "--> CHECKING DEPENDENCIES (Bootstrap)..."
             ./xbps-src binary-bootstrap
 
-            echo "--> FORGING PIXMAN (COMPILATION START)..."
-            # Теперь, когда версия = 99, он точно начнет сборку
-            ./xbps-src -E pkg pixman
+            echo "--> FORGING PIXMAN (COMPILING FROM SOURCE)..."
+            # -E (ethereal), -f (force rebuild), -I (ignore deps check if installed)
+            ./xbps-src -E -f pkg pixman
 
-            echo ">>> [5/5] EXPORTING BINARIES"
+            echo ">>> [4/4] EXPORTING BINARIES"
             find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
+            # Права для кэша
             chmod -R 777 /artifacts
             chown -R 1001:1001 /void-packages /var/cache/xbps
             '
@@ -92,5 +94,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-pixman-custom
+          name: titanium-pixman-compiled
           path: artifacts/
