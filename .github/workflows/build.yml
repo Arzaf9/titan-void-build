@@ -1,4 +1,4 @@
-name: Titanium Forge v36.0 (Lobotomy Maximus)
+name: Titanium Forge v37.0 (Classic Force)
 
 on:
   workflow_dispatch:
@@ -14,12 +14,13 @@ jobs:
           mkdir -p ${{ github.workspace }}/xbps_cache
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Persistent Cache
+      - name: 2. Restore Cache
         uses: actions/cache@v4
         with:
           path: |
             void-packages
             xbps_cache
+          # Используем старый ключ, чтобы не качать репо заново
           key: titanium-v33-${{ github.run_id }}
           restore-keys: titanium-v33-
 
@@ -32,66 +33,64 @@ jobs:
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/5] SYSTEM PREP"
+            echo ">>> [1/4] SYSTEM PREP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+            # Доустанавливаем bash (остальное в кэше)
             xbps-install -Syu -y xbps ca-certificates git bash curl tar
 
-            # Git Fix
+            # Fix Git
             git config --global --add safe.directory /void-packages
             cd /void-packages
 
-            echo ">>> [2/5] REPO SYNC"
+            echo ">>> [2/4] REPO SYNC & CLEANUP"
+            # Чистим старые бинарники, чтобы не мешали
+            rm -rf hostdir/binpkgs/*
+            
             if [ ! -d ".git" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
             else
               git fetch origin && git reset --hard origin/master
             fi
 
-            echo ">>> [3/5] NUCLEAR LOBOTOMY (Cutting out checks)"
-            
-            # 1. Убиваем проверку на Root
+            echo ">>> [3/4] NUCLEAR LOBOTOMY (Root Check Removal)"
+            # 1. Удаляем проверку в главном файле
             sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
-            echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
+            # 2. Удаляем проверки в библиотеках
+            find common/xbps-src/shutils -name "*.sh" -exec sed -i "s/\[ \"\$(id -u)\" = \"0\" \]/false/g" {} +
+            # 3. Гарантируем успех функции check_root
+            echo "check_root() { return 0; }" >> common/xbps-src/shutils/common.sh
+            
+            # 4. Отключаем проверку unshare (на всякий случай)
+            echo "check_unshare() { return 0; }" >> common/xbps-src/shutils/common.sh
 
-            # 2. Убиваем проверку "isn't symlinked to /"
-            # Ищем файл, где эта ошибка, и заменяем msg_error на echo
-            grep -rIl "isn't symlinked to" . | xargs sed -i "s/msg_error .*isn.t symlinked to.*/echo \"Symlink check bypassed\"/g"
-
-            # 3. Убиваем ошибку копирования resolv.conf (копирование самого в себя)
-            # Заменяем команду копирования на "true" (ничего не делать)
-            sed -i "s|cp -f /etc/resolv.conf|true # cp bypassed|g" xbps-src
-
-            echo ">>> [4/5] CONFIGURING HASWELL"
-            # Настройки
-            echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
-            echo "XBPS_MASTERDIR=/" >> etc/conf
-            echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
+            echo ">>> [4/4] CONFIGURING HASWELL"
+            # Удаляем старые конфиги, если были
+            rm -f etc/conf
+            
+            # Пишем чистый конфиг (БЕЗ ETHEREAL, БЕЗ MASTERDIR=/)
             echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
             echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
-            
-            # ЗАПРЕЩАЕМ СКАЧИВАТЬ БИНАРНИКИ (FORCE COMPILE)
+            # ЗАПРЕЩАЕМ СКАЧКУ БИНАРНИКОВ -> ТОЛЬКО СБОРКА
             echo "XBPS_SKIP_REMOTEREPOS=yes" >> etc/conf
             
-            # Флаги
+            # 💎 13 ТИТАНОВЫХ ФЛАГОВ
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
             echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
-            # Паспорт системы
-            touch /.xbps_chroot_init
-
-            echo "--> BOOTSTRAP (Filling dependencies)..."
+            echo "--> BOOTSTRAP (Creating separate masterdir)..."
             ./xbps-src binary-bootstrap
 
             echo "--> FORGING PIXMAN (REAL COMPILATION)..."
-            # -E (ethereal)
-            ./xbps-src -E pkg pixman
+            # Запускаем без флага -E. Скрипт сам создаст chroot в папке masterdir.
+            ./xbps-src pkg pixman
 
-            echo ">>> [5/5] EXPORTING BINARIES"
+            echo ">>> EXPORTING BINARIES"
             find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
+            # Чиним права
             chmod -R 777 /artifacts
             chown -R 1001:1001 /void-packages /var/cache/xbps
             '
