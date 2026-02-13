@@ -1,4 +1,4 @@
-name: Void Forge (Root Bypass Mode)
+name: Void Forge (Ultra Mode)
 
 on:
   workflow_dispatch:
@@ -11,40 +11,46 @@ jobs:
       options: --privileged
 
     steps:
-      - name: 1. Fix Repos & Install Tools
+      - name: 1. System Setup (Root)
         run: |
-          # Чистим зеркала и ставим основное
+          # 1. Исправляем репозитории (уходим с alpha.de)
           rm -rf /etc/xbps.d/*
           echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
           
-          # Игнорим SSL и обновляемся
-          export SSL_NO_VERIFY=1
-          xbps-install -Syu -y xbps || xbps-install -S -y xbps
-          xbps-install -Syu -y ca-certificates git bash curl tar base-devel sudo
+          # 2. Обновляем xbps и ставим базу (игнорим SSL, пока не обновим ca-certificates)
+          xbps-install -Syu -y -o SSL_NO_VERIFY=true xbps
+          xbps-install -Syu -y -o SSL_NO_VERIFY=true ca-certificates git bash curl tar base-devel sudo
 
-      - name: 2. Clone & Bypass Root Check
+          # 3. Создаем пользователя builder (xbps-src не работает от root)
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+      - name: 2. Clone & Permissions
         run: |
           git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
-          cd /void-packages
-          
-          # ХАК: Удаляем проверку на root в самом скрипте xbps-src
-          sed -i 's/id -u) -eq 0/1 -eq 2/' xbps-src
-          
-          # Настройка конфига
-          echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
-          echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-          
-          # Твои Haswell флаги
-          FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto"
-          echo "XBPS_CFLAGS='$FLAGS'" >> etc/conf
-          echo "XBPS_CXXFLAGS='$FLAGS'" >> etc/conf
+          # Даем пользователю builder полные права на папку
+          chown -R builder:builder /void-packages
 
-      - name: 3. Forge Package
+      - name: 3. Forge Package (as Builder)
         run: |
-          cd /void-packages
-          export SSL_NO_VERIFY=1
-          # Теперь он не будет ругаться на рута из-за sed-хака
-          ./xbps-src pkg pixman
+          # Запускаем всё от имени пользователя builder
+          su builder -c '
+            cd /void-packages
+            
+            # Настройка конфига
+            echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
+            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
+            
+            # Твои Haswell оптимизации
+            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto"
+            echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
+            echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
+            
+            # Сборка пакета
+            # SSL_NO_VERIFY=true на случай, если внутри сборки опять упадет SSL
+            export SSL_NO_VERIFY=true
+            ./xbps-src pkg pixman
+          '
 
       - name: 4. Export Result
         if: always()
@@ -52,10 +58,12 @@ jobs:
           mkdir -p /artifacts
           if [ -d "/void-packages/hostdir/binpkgs" ]; then
             find /void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
+          else
+            echo "Пакет не найден. Что-то пошло не так." > /artifacts/error.log
           fi
 
       - name: 5. Upload
         uses: actions/upload-artifact@v4
         with:
-          name: pixman-optimized
+          name: pixman-optimized-xbps
           path: /artifacts/
