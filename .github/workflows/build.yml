@@ -1,4 +1,4 @@
-name: Titanium Forge v37.0 (Classic Force)
+name: Titanium Forge v38.0 (Legit User Mode)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,6 @@ jobs:
           path: |
             void-packages
             xbps_cache
-          # Используем старый ключ, чтобы не качать репо заново
           key: titanium-v33-${{ github.run_id }}
           restore-keys: titanium-v33-
 
@@ -33,71 +32,71 @@ jobs:
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/4] SYSTEM PREP"
+            echo ">>> [1/4] ROOT: SYSTEM PREP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            # Доустанавливаем bash (остальное в кэше)
-            xbps-install -Syu -y xbps ca-certificates git bash curl tar
+            
+            # Ставим bash, sudo и инструменты (Root)
+            xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel sudo shadow
 
-            # Fix Git
-            git config --global --add safe.directory /void-packages
+            # Создаем юзера builder
+            if ! id -u builder >/dev/null 2>&1; then
+              useradd -m -s /bin/bash builder
+              echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+            fi
+
+            # ВАЖНО: Отдаем папку юзеру, иначе git и xbps сломаются
+            chown -R builder:builder /void-packages
+
+            # ПЕРЕКЛЮЧАЕМСЯ НА ЮЗЕРА И РАБОТАЕМ
+            su builder -c "bash << \"USER_EOF\"
+            set -e
             cd /void-packages
 
-            echo ">>> [2/4] REPO SYNC & CLEANUP"
-            # Чистим старые бинарники, чтобы не мешали
-            rm -rf hostdir/binpkgs/*
-            
-            if [ ! -d ".git" ]; then
+            echo \">>> [2/4] USER: REPO SYNC\"
+            if [ ! -d \".git\" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
             else
+              git config --global --add safe.directory /void-packages
               git fetch origin && git reset --hard origin/master
             fi
 
-            echo ">>> [3/4] NUCLEAR LOBOTOMY (Root Check Removal)"
-            # 1. Удаляем проверку в главном файле
-            sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
-            # 2. Удаляем проверки в библиотеках
-            find common/xbps-src/shutils -name "*.sh" -exec sed -i "s/\[ \"\$(id -u)\" = \"0\" \]/false/g" {} +
-            # 3. Гарантируем успех функции check_root
-            echo "check_root() { return 0; }" >> common/xbps-src/shutils/common.sh
-            
-            # 4. Отключаем проверку unshare (на всякий случай)
-            echo "check_unshare() { return 0; }" >> common/xbps-src/shutils/common.sh
-
-            echo ">>> [4/4] CONFIGURING HASWELL"
-            # Удаляем старые конфиги, если были
+            echo \">>> [3/4] USER: CONFIGURING HASWELL\"
+            # Очищаем конфиг
             rm -f etc/conf
             
-            # Пишем чистый конфиг (БЕЗ ETHEREAL, БЕЗ MASTERDIR=/)
-            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-            echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
-            # ЗАПРЕЩАЕМ СКАЧКУ БИНАРНИКОВ -> ТОЛЬКО СБОРКА
-            echo "XBPS_SKIP_REMOTEREPOS=yes" >> etc/conf
+            # Запрещаем скачку бинарников (ТОЛЬКО СБОРКА)
+            echo \"XBPS_SKIP_REMOTEREPOS=yes\" >> etc/conf
+            echo \"XBPS_ALLOW_RESTRICTED=yes\" >> etc/conf
+            echo \"XBPS_MAKEJOBS=\$(nproc)\" >> etc/conf
             
             # 💎 13 ТИТАНОВЫХ ФЛАГОВ
-            FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
-            echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
-            echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
-            echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
+            FLAGS=\\\"-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe\\\"
+            echo \"XBPS_CFLAGS=\$FLAGS\" >> etc/conf
+            echo \"XBPS_CXXFLAGS=\$FLAGS\" >> etc/conf
+            echo \"XBPS_LDFLAGS=\\\"-Wl,-O1 -Wl,--as-needed -flto=auto\\\"\" >> etc/conf
 
-            echo "--> BOOTSTRAP (Creating separate masterdir)..."
+            echo \"--> BOOTSTRAP (Downloading tools)...\"
+            # Это сработает, потому что у нас есть sudo
             ./xbps-src binary-bootstrap
 
-            echo "--> FORGING PIXMAN (REAL COMPILATION)..."
-            # Запускаем без флага -E. Скрипт сам создаст chroot в папке masterdir.
+            echo \"--> FORGING PIXMAN (COMPILING)...\"
+            # Запуск обычной сборки
             ./xbps-src pkg pixman
+            USER_EOF"
 
-            echo ">>> EXPORTING BINARIES"
-            find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
+            echo ">>> [4/4] ROOT: EXPORTING ARTIFACTS"
+            # Возвращаемся в Root для копирования
+            find /void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
-            # Чиним права
-            chmod -R 777 /artifacts
+            # Возвращаем права для сохранения кэша GitHub (UID 1001)
             chown -R 1001:1001 /void-packages /var/cache/xbps
+            chmod -R 777 /artifacts
             '
 
       - name: 4. Upload Result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-pixman-compiled
+          name: titanium-pixman-userbuild
           path: artifacts/
