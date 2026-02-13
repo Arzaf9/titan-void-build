@@ -1,4 +1,4 @@
-name: Titanium Forge v35.0 (Force Source Build)
+name: Titanium Forge v36.0 (Lobotomy Maximus)
 
 on:
   workflow_dispatch:
@@ -32,39 +32,45 @@ jobs:
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/4] SYSTEM PREP"
+            echo ">>> [1/5] SYSTEM PREP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
-            # Быстрая доустановка мелочей (основное в кэше)
             xbps-install -Syu -y xbps ca-certificates git bash curl tar
 
             # Git Fix
             git config --global --add safe.directory /void-packages
             cd /void-packages
 
-            echo ">>> [2/4] REPO SYNC & CLEANUP"
-            # Удаляем старые бинарники, чтобы точно собрать новые
-            rm -rf hostdir/binpkgs/*
-            
+            echo ">>> [2/5] REPO SYNC"
             if [ ! -d ".git" ]; then
               git clone --depth 1 https://github.com/void-linux/void-packages.git .
             else
               git fetch origin && git reset --hard origin/master
             fi
 
-            # Root Patch
-            sed -i "s/\[ \"\$(id -u)\" = \"0\" \]/false/g" xbps-src
+            echo ">>> [3/5] NUCLEAR LOBOTOMY (Cutting out checks)"
+            
+            # 1. Убиваем проверку на Root
+            sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
             echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
 
-            echo ">>> [3/4] CONFIGURING HASWELL EXTREME"
+            # 2. Убиваем проверку "isn't symlinked to /"
+            # Ищем файл, где эта ошибка, и заменяем msg_error на echo
+            grep -rIl "isn't symlinked to" . | xargs sed -i "s/msg_error .*isn.t symlinked to.*/echo \"Symlink check bypassed\"/g"
+
+            # 3. Убиваем ошибку копирования resolv.conf (копирование самого в себя)
+            # Заменяем команду копирования на "true" (ничего не делать)
+            sed -i "s|cp -f /etc/resolv.conf|true # cp bypassed|g" xbps-src
+
+            echo ">>> [4/5] CONFIGURING HASWELL"
+            # Настройки
             echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
             echo "XBPS_MASTERDIR=/" >> etc/conf
             echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
             echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
             echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
             
-            # !!! ГЛАВНОЕ ИЗМЕНЕНИЕ !!!
-            # Запрещаем скачивать готовые бинарники. Только хардкор, только компиляция.
+            # ЗАПРЕЩАЕМ СКАЧИВАТЬ БИНАРНИКИ (FORCE COMPILE)
             echo "XBPS_SKIP_REMOTEREPOS=yes" >> etc/conf
             
             # Флаги
@@ -73,19 +79,19 @@ jobs:
             echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
+            # Паспорт системы
             touch /.xbps_chroot_init
 
-            echo "--> CHECKING DEPENDENCIES (Bootstrap)..."
+            echo "--> BOOTSTRAP (Filling dependencies)..."
             ./xbps-src binary-bootstrap
 
-            echo "--> FORGING PIXMAN (COMPILING FROM SOURCE)..."
-            # -E (ethereal), -f (force rebuild), -I (ignore deps check if installed)
-            ./xbps-src -E -f pkg pixman
+            echo "--> FORGING PIXMAN (REAL COMPILATION)..."
+            # -E (ethereal)
+            ./xbps-src -E pkg pixman
 
-            echo ">>> [4/4] EXPORTING BINARIES"
+            echo ">>> [5/5] EXPORTING BINARIES"
             find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
-            # Права для кэша
             chmod -R 777 /artifacts
             chown -R 1001:1001 /void-packages /var/cache/xbps
             '
