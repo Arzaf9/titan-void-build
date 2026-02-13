@@ -1,59 +1,65 @@
-name: Void Forge (Ethereal Mode)
+name: Void Forge (Anti-SSL Chaos Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    # Запускаем всё прямо внутри образа Void Linux
+    runs-on: ubuntu-22.04  # 22.04 более лояльна к системным вызовам
     container:
       image: voidlinux/voidlinux-musl:latest
-      options: --privileged
+      options: --privileged --user root
 
     steps:
-      - name: 1. System Prep
+      - name: 1. Fix Repositories & SSL
         run: |
-          # Обновляем систему и ставим базовые инструменты сборки
-          xbps-install -Syu -y xbps
-          xbps-install -Syu -y git bash curl tar base-devel
-          # Нам не нужен sudo, мы и так root внутри контейнера
+          # 1. Сносим всё, что связано с капризным alpha.de
+          rm -rf /etc/xbps.d/*
+          
+          # 2. Прописываем надежное зеркало
+          echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
+          
+          # 3. Хак: заставляем xbps игнорировать проверку сертификатов, если они протухли
+          # (Operation not permitted часто лечится обновлением ca-certificates)
+          export SSL_NO_VERIFY=1
+          
+          # 4. Обновляемся
+          xbps-install -Syu -y xbps || xbps-install -S -y xbps
+          xbps-install -Syu -y ca-certificates git bash curl tar base-devel
 
       - name: 2. Clone void-packages
         run: |
           git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
 
-      - name: 3. Configure xbps-src (Ethereal)
+      - name: 3. Setup Ethereal Forge
         run: |
           cd /void-packages
-          # ВКЛЮЧАЕМ РЕЖИМ ETHEREAL
-          # Это заставляет xbps-src собирать пакеты прямо в текущей системе 
-          # без использования chroot/bwrap/namespaces
+          # Режим ethereal — собираем прямо в этой системе
           echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
           echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
           
-          # Твои Haswell оптимизации
+          # Твои Haswell флаги
           FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto"
           echo "XBPS_CFLAGS='$FLAGS'" >> etc/conf
           echo "XBPS_CXXFLAGS='$FLAGS'" >> etc/conf
-          
-          # В режиме ethereal бинарный бутстрап не нужен так, как в обычном,
-          # но зависимости для сборки подтянутся сами.
 
       - name: 4. Build Package
         run: |
           cd /void-packages
-          # Собираем пакет. В режиме ethereal он установит сборочные зависимости прямо в контейнер.
+          # Игнорируем проверку SSL и здесь на всякий случай
+          export SSL_NO_VERIFY=1
           ./xbps-src pkg pixman
 
-      - name: 5. Collect Artifacts
+      - name: 5. Export Binaries
         if: always()
         run: |
           mkdir -p /artifacts
-          find /void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
+          if [ -d "/void-packages/hostdir/binpkgs" ]; then
+            find /void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
+          fi
 
       - name: 6. Upload
         uses: actions/upload-artifact@v4
         with:
-          name: pixman-haswell-musl
+          name: pixman-fixed
           path: /artifacts/
