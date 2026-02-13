@@ -1,4 +1,4 @@
-name: Void Forge (Native Fix)
+name: Void Forge (Ethereal Mode)
 
 on:
   workflow_dispatch:
@@ -6,23 +6,30 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Запускаем всё прямо внутри образа Void Linux
+    container:
+      image: voidlinux/voidlinux-musl:latest
+      options: --privileged
+
     steps:
-      - name: 1. Install XBPS Static
+      - name: 1. System Prep
         run: |
-          # Используем -Lk: L — следовать редиректам, k — игнорировать ошибки SSL
-          curl -Lk https://repo-default.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz -o xbps.tar.xz
-          mkdir xbps_bin
-          tar xf xbps.tar.xz -C xbps_bin
-          sudo cp xbps_bin/usr/bin/xbps-* /usr/bin/
-          # Проверяем, что работает
-          xbps-install --version
+          # Обновляем систему и ставим базовые инструменты сборки
+          xbps-install -Syu -y xbps
+          xbps-install -Syu -y git bash curl tar base-devel
+          # Нам не нужен sudo, мы и так root внутри контейнера
 
       - name: 2. Clone void-packages
         run: |
-          git clone --depth=1 https://github.com/void-linux/void-packages.git
-          cd void-packages
-          # Настройка для работы внутри Ubuntu контейнера
-          echo "XBPS_CHROOT_CMD=uchroot" >> etc/conf
+          git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
+
+      - name: 3. Configure xbps-src (Ethereal)
+        run: |
+          cd /void-packages
+          # ВКЛЮЧАЕМ РЕЖИМ ETHEREAL
+          # Это заставляет xbps-src собирать пакеты прямо в текущей системе 
+          # без использования chroot/bwrap/namespaces
+          echo "XBPS_CHROOT_CMD=ethereal" >> etc/conf
           echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
           
           # Твои Haswell оптимизации
@@ -30,28 +37,23 @@ jobs:
           echo "XBPS_CFLAGS='$FLAGS'" >> etc/conf
           echo "XBPS_CXXFLAGS='$FLAGS'" >> etc/conf
           
-          # Чтобы не качать лишнего, только базу
-          ./xbps-src binary-bootstrap
+          # В режиме ethereal бинарный бутстрап не нужен так, как в обычном,
+          # но зависимости для сборки подтянутся сами.
 
-      - name: 3. Build Package
+      - name: 4. Build Package
         run: |
-          cd void-packages
-          # Собираем пакет
+          cd /void-packages
+          # Собираем пакет. В режиме ethereal он установит сборочные зависимости прямо в контейнер.
           ./xbps-src pkg pixman
 
-      - name: 4. Collect Artifacts
+      - name: 5. Collect Artifacts
         if: always()
         run: |
-          mkdir -p out
-          # Если папка существует, копируем. Если нет — создаем пустой файл, чтобы не падать
-          if [ -d "void-packages/hostdir/binpkgs" ]; then
-            find void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} out/ \;
-          else
-            echo "Build failed, no packages found" > out/failure.txt
-          fi
+          mkdir -p /artifacts
+          find /void-packages/hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
 
-      - name: 5. Upload
+      - name: 6. Upload
         uses: actions/upload-artifact@v4
         with:
-          name: void-package-result
-          path: out/
+          name: pixman-haswell-musl
+          path: /artifacts/
