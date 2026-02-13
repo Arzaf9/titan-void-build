@@ -1,4 +1,4 @@
-name: Titanium Forge v40.0 (Native Root)
+name: Titanium Forge v41.0 (Source Enforcer)
 
 on:
   workflow_dispatch:
@@ -28,12 +28,11 @@ jobs:
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/5] SYSTEM PREP (NATIVE)"
+            echo ">>> [1/5] NATIVE SYSTEM PREP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
             
-            # Устанавливаем инструменты сборки ПРЯМО В КОНТЕЙНЕР
-            # Нам не нужен binary-bootstrap, мы сами ставим gcc и make
+            # Ставим всё необходимое для компиляции прямо в Докер
             xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel shadow
 
             git config --global --add safe.directory /void-packages
@@ -46,42 +45,45 @@ jobs:
               git fetch origin && git reset --hard origin/master
             fi
 
-            echo ">>> [3/5] CODE LOBOTOMY (Surgery)"
-            # 1. Разрешаем работу от Root
+            echo ">>> [3/5] NUCLEAR LOBOTOMY"
+            # 1. Убиваем проверку на Root
             sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
-            # 2. Убиваем ошибку копирования resolv.conf (мы и так в системе)
+            # 2. Убиваем конфликт resolv.conf
             sed -i "s|cp -f /etc/resolv.conf|true #|g" xbps-src
-            # 3. Убиваем проверку на симлинки корня
-            grep -rIl "isn.t symlinked to" . | xargs sed -i "s/msg_error .*isn.t symlinked to.*/true/g" 2>/dev/null || true
-            # 4. Патчим библиотеки
+            # 3. Убиваем проверку структуры мастердира
+            sed -i "s/msg_error .*isn.t symlinked to.*/true/g" common/xbps-src/shutils/chroot.sh 2>/dev/null || true
+            # 4. Зануляем функцию проверки
             echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
 
-            echo ">>> [4/5] CONFIGURING HASWELL"
-            # Говорим скрипту: "Твоя база - это вся файловая система (/)"
+            echo ">>> [4/5] CONFIGURING HASWELL (FORCE SOURCE)"
+            # Создаем чистый конфиг
             echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
             echo "XBPS_MASTERDIR=/" >> etc/conf
             echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
             echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
             echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
             
-            # Ставим метки, что система готова
-            touch /.xbps_chroot_init
+            # --- КЛЮЧЕВОЙ МОМЕНТ: ИГНОРИРУЕМ УДАЛЕННЫЕ РЕПОЗИТОРИИ ---
+            echo "XBPS_SKIP_REMOTEREPOS=yes" >> etc/conf
             
-            # 💎 ФЛАГИ
+            # 💎 ТВОИ 13 ТИТАНОВЫХ ФЛАГОВ
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
             echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
-            echo ">>> [5/5] FORGING PIXMAN (NATIVE COMPILE)"
-            # -E: использовать текущую систему
-            # -f: пересобрать
-            # -D: не проверять зависимости (мы поставили base-devel вручную)
-            ./xbps-src -E -f -D pkg pixman
+            # Имитируем пройденный бутстрап
+            touch /.xbps_chroot_init
 
-            echo ">>> EXPORTING..."
+            echo ">>> [5/5] FORGING PIXMAN (GCC START)"
+            # Убираем -D, добавляем -f
+            ./xbps-src -E -f pkg pixman
+
+            echo ">>> EXPORTING BINARIES"
+            # Ищем пакеты и копируем их наружу
             find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
+            # Даем права для GitHub
             chmod -R 777 /artifacts
             chown -R 1001:1001 /void-packages
             '
@@ -90,5 +92,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-pixman-native
+          name: titanium-pixman-haswell
           path: artifacts/
