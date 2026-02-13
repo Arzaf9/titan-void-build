@@ -1,4 +1,4 @@
-name: Titanium Forge v43.1 (Verbose Debug)
+name: Titanium Forge v44.0 (Debug Trace)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
           mkdir -p ${{ github.workspace }}/xbps_pkg_cache
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Persistent Cache
+      - name: 2. Restore Cache
         uses: actions/cache@v4
         with:
           path: |
@@ -23,7 +23,7 @@ jobs:
           key: titanium-v43-${{ github.run_id }}
           restore-keys: titanium-v43-
 
-      - name: 3. THE TITANIUM BUILDER (VERBOSE)
+      - name: 3. THE TITANIUM BUILDER (TRACE MODE)
         run: |
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
@@ -31,57 +31,35 @@ jobs:
             -v ${{ github.workspace }}/xbps_pkg_cache:/var/cache/xbps \
             voidlinux/voidlinux-musl /bin/sh -c '
             
-            echo ">>> [1/5] REPAIRING SYSTEM"
+            # ВКЛЮЧАЕМ ТРАССИРОВКУ (Покажет каждую команду)
+            set -x
+            
+            echo ">>> [1/5] SYSTEM PREP"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
             
-            # Ставим базу
-            xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel shadow || echo "System update had warnings"
+            # Ставим инструменты (Честный Root)
+            xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel shadow
 
-            # Переходим в репо
             git config --global --add safe.directory /void-packages
-            cd /void-packages || exit 1
+            cd /void-packages
 
-            echo ">>> [2/5] REPO CHECK"
-            if [ ! -d ".git" ]; then
-              echo "Cloning repo..."
-              git clone --depth 1 https://github.com/void-linux/void-packages.git . || exit 1
-            fi
+            echo ">>> [2/5] REPO SYNC"
+            [ ! -d ".git" ] && git clone --depth 1 https://github.com/void-linux/void-packages.git .
             git fetch origin && git reset --hard origin/master
 
-            echo ">>> [3/5] LOBOTOMY & OVERRIDE"
+            echo ">>> [3/5] SURGICAL PATCHING (No Fake ID)"
+            # 1. Удаляем проверку на Root в xbps-src (блок из 3 строк)
+            sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
             
-            # Ищем, где реально лежат библиотеки
-            SHUTILS_DIR=$(find . -type d -name shutils | head -n 1)
-            echo "Shutils directory found at: $SHUTILS_DIR"
+            # 2. Зануляем функцию проверки в библиотеках
+            echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
             
-            if [ -z "$SHUTILS_DIR" ]; then
-                echo "CRITICAL ERROR: Shutils not found!"
-                ls -R
-                exit 1
-            fi
+            # 3. Отключаем копирование resolv.conf (в режиме Ethereal это вызывает ошибку)
+            sed -i "s|cp -f /etc/resolv.conf|# cp skipped|g" xbps-src
 
-            # 🎭 ГЛАВНЫЙ ВЗЛОМ: Подменяем ID системы
-            # Это обманет проверку check_root без правки кода
-            mv /usr/bin/id /usr/bin/id_real
-            echo "#!/bin/sh" > /usr/bin/id
-            echo "if [ \"\$1\" = \"-u\" ]; then echo 1001; else /usr/bin/id_real \"\$@\"; fi" >> /usr/bin/id
-            chmod +x /usr/bin/id
-            echo "Identity check: UID is $(id -u) (Should be 1001)"
-
-            # Отключаем unshare (на всякий случай)
-            ln -sf /bin/true /usr/bin/unshare
-
-            # 💉 ПРЯМАЯ ИНЪЕКЦИЯ В БИБЛИОТЕКИ (с проверкой)
-            echo "Patching common.sh..."
-            [ -f "$SHUTILS_DIR/common.sh" ] && echo "check_root() { return 0; }" >> "$SHUTILS_DIR/common.sh"
-            
-            echo "Patching chroot.sh..."
-            if [ -f "$SHUTILS_DIR/chroot.sh" ]; then
-                echo "chroot_handler() { shift; eval \"\$@\"; }" >> "$SHUTILS_DIR/chroot.sh"
-            fi
-
-            echo ">>> [4/5] CONFIGURING HASWELL"
+            echo ">>> [4/5] CONFIGURING"
+            # Чистый конфиг
             cat << CONF_EOF > etc/conf
             XBPS_CHROOT_CMD=ethereal
             XBPS_MASTERDIR=/
@@ -91,30 +69,24 @@ jobs:
             XBPS_MAKEJOBS=\$(nproc)
             CONF_EOF
             
-            # 💎 13 ТИТАНОВЫХ ФЛАГОВ
+            # 💎 ФЛАГИ HASWELL
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
-            echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
-            echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
+            echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
             # Паспорт системы
             touch /.xbps_chroot_init
-            mkdir -p masterdir
-            touch masterdir/.xbps_chroot_init
 
             echo ">>> [5/5] FORGING PIXMAN"
-            # Запускаем bash для сборки
-            /bin/bash ./xbps-src -E -f pkg pixman 2>&1 | tee /tmp/build_log.txt
+            # Запускаем через bash с выводом отладки
+            # -E (ethereal)
+            /bin/bash -x ./xbps-src -E pkg pixman
 
-            echo ">>> EXPORTING BINARIES"
+            echo ">>> EXPORTING"
             find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
-            # Если артефактов нет, покажем почему
-            if [ ! "$(ls -A /artifacts)" ]; then
-                echo "Build failed. Last 50 lines of log:"
-                tail -n 50 /tmp/build_log.txt
-            fi
-
+            # Права для кэша
             chmod -R 777 /artifacts
             chown -R 1001:1001 /void-packages /var/cache/xbps
             '
@@ -123,5 +95,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: titanium-debug-log
+          name: titanium-debug-v44
           path: artifacts/
