@@ -1,4 +1,4 @@
-name: Titanium Forge v41.0 (Source Enforcer)
+name: Titanium Forge v42.0
 
 on:
   workflow_dispatch:
@@ -9,83 +9,91 @@ jobs:
     steps:
       - name: 1. Workspace Init
         run: |
+          # Создаем папки на хосте
           mkdir -p ${{ github.workspace }}/void-packages
           mkdir -p ${{ github.workspace }}/artifacts
+          mkdir -p ${{ github.workspace }}/xbps_pkg_cache
           sudo chmod -R 777 ${{ github.workspace }}
 
-      - name: 2. Restore Cache
+      - name: 2. Restore Persistent Cache
         uses: actions/cache@v4
         with:
-          path: void-packages
-          key: titanium-v33-${{ github.run_id }}
-          restore-keys: titanium-v33-
+          path: |
+            void-packages
+            xbps_pkg_cache
+          key: titanium-v42-${{ github.run_id }}
+          restore-keys: |
+            titanium-v42-
 
       - name: 3. THE TITANIUM BUILDER
         run: |
+          # Монтируем кэш пакетов в /var/cache/xbps контейнера
           docker run --privileged --rm \
             -v ${{ github.workspace }}/void-packages:/void-packages \
             -v ${{ github.workspace }}/artifacts:/artifacts \
+            -v ${{ github.workspace }}/xbps_pkg_cache:/var/cache/xbps \
             voidlinux/voidlinux-musl /bin/sh -c '
             set -e
 
-            echo ">>> [1/5] NATIVE SYSTEM PREP"
+            echo ">>> [1/5] REPAIRING SYSTEM & MIRRORS"
             mkdir -p /etc/xbps.d
             echo "repository=https://repo-default.voidlinux.org/current/musl" > /etc/xbps.d/00-repository-main.conf
             
-            # Ставим всё необходимое для компиляции прямо в Докер
+            # Установка инструментов. Благодаря монтированию /var/cache/xbps, 
+            # скачивания во второй раз не будет (только установка).
             xbps-install -Syu -y xbps ca-certificates git bash curl tar base-devel shadow
 
             git config --global --add safe.directory /void-packages
             cd /void-packages
 
             echo ">>> [2/5] REPO SYNC"
-            if [ ! -d ".git" ]; then
-              git clone --depth 1 https://github.com/void-linux/void-packages.git .
-            else
-              git fetch origin && git reset --hard origin/master
-            fi
+            [ ! -d ".git" ] && git clone --depth 1 https://github.com/void-linux/void-packages.git .
+            git fetch origin && git reset --hard origin/master
 
-            echo ">>> [3/5] NUCLEAR LOBOTOMY"
-            # 1. Убиваем проверку на Root
+            echo ">>> [3/5] HARDCORE LOBOTOMY (Killing checks)"
+            # 1. Убиваем проверку на Root (блок if-fi целиком)
             sed -i "/\[ \"\$(id -u)\" = \"0\" \]/,+2d" xbps-src
-            # 2. Убиваем конфликт resolv.conf
-            sed -i "s|cp -f /etc/resolv.conf|true #|g" xbps-src
-            # 3. Убиваем проверку структуры мастердира
-            sed -i "s/msg_error .*isn.t symlinked to.*/true/g" common/xbps-src/shutils/chroot.sh 2>/dev/null || true
-            # 4. Зануляем функцию проверки
+            
+            # 2. Убиваем конфликт resolv.conf (заменяем cp на #)
+            sed -i "s|cp -f /etc/resolv.conf|#|g" xbps-src
+
+            # 3. Убиваем проверку Symlink в библиотеке chroot.sh
+            # Мы просто удаляем строки, где вылетает ERROR про symlink
+            sed -i "/msg_error .*isn.t symlinked to/d" common/xbps-src/shutils/chroot.sh
+
+            # 4. Зануляем функцию проверки в библиотеке
             echo "check_root() { return 0; }" > common/xbps-src/shutils/check_root.sh
 
-            echo ">>> [4/5] CONFIGURING HASWELL (FORCE SOURCE)"
-            # Создаем чистый конфиг
-            echo "XBPS_CHROOT_CMD=ethereal" > etc/conf
-            echo "XBPS_MASTERDIR=/" >> etc/conf
-            echo "XBPS_ALLOW_CHROOT_BREAKOUT=yes" >> etc/conf
-            echo "XBPS_ALLOW_RESTRICTED=yes" >> etc/conf
-            echo "XBPS_MAKEJOBS=$(nproc)" >> etc/conf
-            
-            # --- КЛЮЧЕВОЙ МОМЕНТ: ИГНОРИРУЕМ УДАЛЕННЫЕ РЕПОЗИТОРИИ ---
-            echo "XBPS_SKIP_REMOTEREPOS=yes" >> etc/conf
+            echo ">>> [4/5] CONFIGURING HASWELL"
+            # Пишем конфиг с нуля
+            cat << CONF_EOF > etc/conf
+            XBPS_CHROOT_CMD=ethereal
+            XBPS_MASTERDIR=/
+            XBPS_ALLOW_CHROOT_BREAKOUT=yes
+            XBPS_ALLOW_RESTRICTED=yes
+            XBPS_SKIP_REMOTEREPOS=yes
+            XBPS_MAKEJOBS=\$(nproc)
+            CONF_EOF
             
             # 💎 ТВОИ 13 ТИТАНОВЫХ ФЛАГОВ
             FLAGS="-O3 -march=haswell -mtune=haswell -flto=auto -fno-plt -fno-semantic-interposition -mprefer-vector-width=256 -ftree-vectorize -funroll-loops -floop-nest-optimize -fipa-pta -fdevirtualize-at-ltrans -pipe"
-            echo "XBPS_CFLAGS=\"$FLAGS\"" >> etc/conf
-            echo "XBPS_CXXFLAGS=\"$FLAGS\"" >> etc/conf
+            echo "XBPS_CFLAGS=\"\$FLAGS\"" >> etc/conf
+            echo "XBPS_CXXFLAGS=\"\$FLAGS\"" >> etc/conf
             echo "XBPS_LDFLAGS=\"-Wl,-O1 -Wl,--as-needed -flto=auto\"" >> etc/conf
 
-            # Имитируем пройденный бутстрап
+            # Имитация бутстрапа
             touch /.xbps_chroot_init
 
-            echo ">>> [5/5] FORGING PIXMAN (GCC START)"
-            # Убираем -D, добавляем -f
+            echo ">>> [5/5] FORGING PIXMAN (FORCE SOURCE)"
+            # Теперь он НЕ скажет про resolv.conf и symlink
             ./xbps-src -E -f pkg pixman
 
             echo ">>> EXPORTING BINARIES"
-            # Ищем пакеты и копируем их наружу
             find hostdir/binpkgs -name "*.xbps" -exec cp -v {} /artifacts/ \;
             
-            # Даем права для GitHub
+            # Чиним права для кэша GitHub (UID 1001)
             chmod -R 777 /artifacts
-            chown -R 1001:1001 /void-packages
+            chown -R 1001:1001 /void-packages /var/cache/xbps
             '
 
       - name: 4. Upload Result
